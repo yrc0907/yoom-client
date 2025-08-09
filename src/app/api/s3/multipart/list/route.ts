@@ -1,4 +1,4 @@
-import { S3Client, CompleteMultipartUploadCommand } from "@aws-sdk/client-s3";
+import { S3Client, ListPartsCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
@@ -16,7 +16,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, requestHandler });
+  return new S3Client({ region: AWS_REGION, forcePathStyle: true, requestHandler });
 }
 
 const s3 = createS3Client();
@@ -29,24 +29,28 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const key: string | undefined = body.key;
     const uploadId: string | undefined = body.uploadId;
-    const parts: { ETag: string; PartNumber: number }[] | undefined = body.parts;
 
-    if (!key || !uploadId || !parts || parts.length === 0) {
-      return new Response(JSON.stringify({ error: "key, uploadId, parts 必填" }), { status: 400 });
+    if (!key || !uploadId) {
+      return new Response(JSON.stringify({ error: "key, uploadId 必填" }), { status: 400 });
     }
 
-    const cmd = new CompleteMultipartUploadCommand({
-      Bucket: S3_BUCKET_NAME,
-      Key: key,
-      UploadId: uploadId,
-      MultipartUpload: { Parts: parts.map(p => ({ ETag: p.ETag, PartNumber: p.PartNumber })) },
-    });
-    await s3.send(cmd);
+    const parts: { ETag: string; PartNumber: number; Size?: number }[] = [];
+    let partNumberMarker: number | undefined = undefined;
 
-    return Response.json({ ok: true, key });
+    // 处理分页
+    while (true) {
+      const res = await s3.send(new ListPartsCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumberMarker: partNumberMarker }));
+      (res.Parts || []).forEach(p => {
+        if (p.PartNumber && p.ETag) parts.push({ ETag: p.ETag.replaceAll('"', ''), PartNumber: p.PartNumber, Size: p.Size });
+      });
+      if (!res.IsTruncated) break;
+      partNumberMarker = res.NextPartNumberMarker || undefined;
+    }
+
+    return Response.json({ parts });
   } catch (error: unknown) {
-    console.error("[multipart/complete] error", error);
-    const msg = error instanceof Error ? error.message : "complete failed";
+    console.error("[multipart/list] error", error);
+    const msg = error instanceof Error ? error.message : "list failed";
     return new Response(JSON.stringify({ error: msg }), { status: 500 });
   }
 } 

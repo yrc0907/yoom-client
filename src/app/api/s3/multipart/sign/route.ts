@@ -17,7 +17,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, forcePathStyle: true, requestHandler });
+  return new S3Client({ region: AWS_REGION, requestHandler });
 }
 
 const s3 = createS3Client();
@@ -36,7 +36,9 @@ export async function POST(request: Request) {
       return new Response(JSON.stringify({ error: "key, uploadId, partNumber 必填" }), { status: 400 });
     }
 
-    const cmd = new UploadPartCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumber: partNumber, Body: new Uint8Array() });
+    // 关键：不要在签名时传 Body，否则 SDK 会把该 Body 的校验和写入签名，
+    // 实际上传不同内容会触发 403 Forbidden。
+    const cmd = new UploadPartCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumber: partNumber });
     const url = await getSignedUrl(s3, cmd, { expiresIn: 900 });
 
     return Response.json({ url });

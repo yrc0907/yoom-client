@@ -50,7 +50,6 @@ export default function VideoGallery() {
 
   useEffect(() => {
     load(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -85,10 +84,14 @@ export default function VideoGallery() {
       >
         {items.map((it) => (
           <div key={it.key} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
-            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>{it.key.split("/").at(-1)}</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{it.key.split("/").at(-1)}</span>
+              <button onClick={() => { navigator.clipboard.writeText(it.url); }} style={{ fontSize: 12, background: '#f3f4f6', padding: '2px 6px', borderRadius: 6 }}>复制链接</button>
+            </div>
             <VideoPlayer
               src={it.url}
               title={it.key.split("/").at(-1)}
+              storageId={it.key}
               expiresAt={Date.now() + expires * 1000}
               onRequestRefreshUrl={async () => {
                 const u = new URL("/api/s3/signed-url", window.location.origin);

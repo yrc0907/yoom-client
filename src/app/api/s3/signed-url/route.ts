@@ -17,7 +17,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, forcePathStyle: true, requestHandler });
+  return new S3Client({ region: AWS_REGION, requestHandler });
 }
 
 const s3 = createS3Client();

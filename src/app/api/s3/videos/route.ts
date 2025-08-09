@@ -29,7 +29,6 @@ function createS3Client(): S3Client {
 
   return new S3Client({
     region: AWS_REGION,
-    forcePathStyle: true,
     requestHandler,
   });
 }
