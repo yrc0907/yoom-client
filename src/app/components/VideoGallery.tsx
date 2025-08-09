@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import VideoPlayer from "@/app/components/VideoPlayer";
 
 type VideoItem = {
   key: string;
@@ -20,6 +21,7 @@ export default function VideoGallery() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nextToken, setNextToken] = useState<string | null>(null);
+  const [expires, setExpires] = useState<number>(600);
 
   const limit = useMemo(() => 12, []);
 
@@ -37,6 +39,7 @@ export default function VideoGallery() {
       const data = (await res.json()) as ListResponse;
       setItems((prev) => (token ? [...prev, ...data.items] : data.items));
       setNextToken(data.nextToken);
+      setExpires(data.expires ?? 600);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "加载失败";
       setError(msg);
@@ -46,8 +49,6 @@ export default function VideoGallery() {
   }
 
   useEffect(() => {
-    // 初次加载
-
     load(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -85,10 +86,19 @@ export default function VideoGallery() {
         {items.map((it) => (
           <div key={it.key} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
             <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>{it.key.split("/").at(-1)}</div>
-            <video
+            <VideoPlayer
               src={it.url}
-              controls
-              style={{ width: "100%", borderRadius: 6, background: "#000" }}
+              title={it.key.split("/").at(-1)}
+              expiresAt={Date.now() + expires * 1000}
+              onRequestRefreshUrl={async () => {
+                const u = new URL("/api/s3/signed-url", window.location.origin);
+                u.searchParams.set("key", it.key);
+                u.searchParams.set("expires", String(expires));
+                const res = await fetch(u.toString());
+                if (!res.ok) throw new Error(await res.text());
+                const data = (await res.json()) as { url: string };
+                return data.url;
+              }}
             />
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
               <a href={it.url} target="_blank" rel="noreferrer" style={{ color: "#2563eb", fontSize: 14 }}>

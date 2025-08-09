@@ -99,4 +99,20 @@ export async function GET(request: Request) {
       { status: 502 }
     );
   }
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const key: string | undefined = body.key;
+    if (!key) {
+      return new Response(JSON.stringify({ error: "key 必填" }), { status: 400 });
+    }
+    // 这里不做持久化，仅返回 ok。可在未来接入 DB 做索引或审核。
+    return Response.json({ ok: true, key });
+  } catch (error: unknown) {
+    console.error("[videos][POST] error", error);
+    const message = error instanceof Error ? error.message : "Failed to register video";
+    return new Response(JSON.stringify({ error: message }), { status: 500 });
+  }
 } 
