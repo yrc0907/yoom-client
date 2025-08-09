@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useToast } from "./ToastCenter";
 
 export type EnterpriseUploaderProps = {
   accept?: string;
@@ -28,8 +29,55 @@ function getFingerprint(file: File): string {
   return `${file.name}|${file.size}|${file.lastModified}`;
 }
 
+// 生成封面帧（JPG）
+async function generatePosterFromFile(file: File, atSeconds = 1.5): Promise<Blob> {
+  const url = URL.createObjectURL(file);
+  try {
+    const video = document.createElement("video");
+    video.src = url;
+    video.crossOrigin = "anonymous";
+    video.preload = "metadata";
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => resolve();
+      video.onerror = () => reject(new Error("metadata load failed"));
+    });
+    video.currentTime = Math.min(atSeconds, Math.max(0, (video.duration || atSeconds) - 0.1));
+    await new Promise<void>((resolve) => { video.onseeked = () => resolve(); });
+    const canvas = document.createElement("canvas");
+    const w = Math.min(640, video.videoWidth || 640);
+    const h = Math.round(w * (video.videoHeight || 360) / (video.videoWidth || 640));
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas context missing");
+    ctx.drawImage(video, 0, 0, w, h);
+    const blob: Blob = await new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("toBlob failed")), "image/jpeg", 0.85));
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// 通过预签名直传封面
+async function uploadPosterBlob(baseName: string, blob: Blob): Promise<string> {
+  const presign = await fetch("/api/s3/presign-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileName: `${baseName}.jpg`, fileType: "image/jpeg", fileSize: blob.size, baseName }),
+  });
+  if (!presign.ok) throw new Error(await presign.text());
+  const { url, fields, key } = await presign.json() as { url: string; fields: Record<string, string>; key: string };
+  const fd = new FormData();
+  Object.entries(fields).forEach(([k, v]) => fd.append(k, v));
+  fd.append("file", blob, `${baseName}.jpg`);
+  const res = await fetch(url, { method: "POST", body: fd });
+  if (!res.ok) throw new Error(`upload poster failed: ${res.status}`);
+  return key;
+}
+
 export default function EnterpriseUploader({ accept = "video/*", partSizeBytes = 8 * 1024 * 1024, concurrency = 4, onCompleted }: EnterpriseUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const { show } = useToast();
+
   const [uploading, setUploading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -37,6 +85,12 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   const [error, setError] = useState<string | null>(null);
   const [speed, setSpeed] = useState<string>("0 MB/s");
   const [eta, setEta] = useState<string>("--");
+
+  const [curConcurrency, setCurConcurrency] = useState<number>(concurrency);
+
+  type QueueItem = { file: File; name: string; size: number; status: "pending" | "uploading" | "paused" | "done" | "error"; progress: number; key?: string; message?: string };
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
 
   const controllerRef = useRef<AbortController | null>(null);
   const currentUploadRef = useRef<{ key: string; uploadId: string; chunkSize: number; file?: File } | null>(null);
@@ -58,12 +112,39 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     return { partNumbers: setNums, uploadedBytes };
   }
 
+  function enqueueFiles(files: File[]) {
+    if (files.length === 0) return;
+    setQueue((prev) => [...prev, ...files.map<QueueItem>(f => ({ file: f, name: f.name, size: f.size, status: "pending" as const, progress: 0 }))]);
+    // 若当前无任务在跑，启动
+    setTimeout(() => {
+      if (activeIdx === null) processNext();
+    }, 0);
+  }
+
+  function processNext() {
+    setError(null);
+    setStatus(null);
+    setSpeed("0 MB/s");
+    setEta("--");
+    setProgress(0);
+
+    setQueue((prev) => {
+      const idx = prev.findIndex(it => it.status === "pending");
+      if (idx === -1) { setActiveIdx(null); setUploading(false); setStatus(null); return prev; }
+      setActiveIdx(idx);
+      const next = [...prev];
+      next[idx] = { ...next[idx], status: "uploading", progress: 0 };
+      setUploading(true);
+      void startOrResumeUpload(next[idx].file);
+      return next;
+    });
+  }
+
   async function startOrResumeUpload(file: File) {
     setError(null);
     setProgress(0);
     setStatus("准备上传...");
 
-    setUploading(true);
     setPaused(false);
 
     const fingerprint = getFingerprint(file);
@@ -97,7 +178,6 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     const totalParts = Math.ceil(file.size / chunkSize);
     totalBytesRef.current = file.size;
 
-    // 获取已上传分片
     const listed = await listUploadedParts(key!, uploadId!);
     pendingPartsRef.current = new Set(Array.from({ length: totalParts }, (_, i) => i + 1).filter(n => !listed.partNumbers.has(n)));
     uploadedBytesRef.current = listed.uploadedBytes;
@@ -117,7 +197,6 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     const controller = new AbortController();
     controllerRef.current = controller;
 
-    // 速度统计
     lastTickRef.current = performance.now();
     lastBytesRef.current = uploadedBytesRef.current;
 
@@ -126,7 +205,6 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       const end = Math.min(file.size, partNumber * chunkSize);
       const blob = file.slice(start, end);
 
-      // 签名请求不携带 signal，避免被误中止
       const signRes = await fetch("/api/s3/multipart/sign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -135,20 +213,16 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       if (!signRes.ok) throw new Error(await signRes.text());
       const { url } = await signRes.json() as { url: string };
 
-      const etag = await retry(async () => {
+      await retry(async () => {
         const res = await fetch(url, { method: "PUT", body: blob, signal: controller.signal });
         if (!res.ok) throw new Error(`上传分片失败 ${partNumber}: ${res.status}`);
-        const etagHeader = res.headers.get("ETag") || res.headers.get("etag");
-        if (!etagHeader) throw new Error("缺少ETag响应头");
-        return etagHeader.replaceAll('"', '');
       });
 
-      // 成功后再移除该分片
       pendingPartsRef.current.delete(partNumber);
       uploadedBytesRef.current += blob.size;
 
       const now = performance.now();
-      const dt = (now - lastTickRef.current) / 1000; // 秒
+      const dt = (now - lastTickRef.current) / 1000;
       if (dt >= 0.5) {
         const dBytes = uploadedBytesRef.current - lastBytesRef.current;
         const mbps = dBytes / dt / (1024 * 1024);
@@ -161,13 +235,15 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
         lastBytesRef.current = uploadedBytesRef.current;
       }
 
-      setProgress(Math.round((uploadedBytesRef.current / totalBytesRef.current) * 100));
+      const percent = Math.round((uploadedBytesRef.current / totalBytesRef.current) * 100);
+      setProgress(percent);
+      if (activeIdx !== null) setQueue(prev => prev.map((it, i) => i === activeIdx ? { ...it, progress: percent } : it));
     }
 
     let active = 0;
     const trySpawn = () => {
       if (paused) return;
-      while (active < concurrency && pendingPartsRef.current.size > 0) {
+      while (active < curConcurrency && pendingPartsRef.current.size > 0) {
         const it = pendingPartsRef.current.values().next();
         const partNumber = it.value as number;
         active++;
@@ -175,17 +251,14 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
           active--; trySpawn();
         }).catch((err) => {
           active--;
-          // 中止：不报错，保留该分片在队列中以便继续
           const e2 = err as { name?: string };
           if (e2?.name === "AbortError" || controller.signal.aborted) {
-            // do nothing
+            // no-op
           } else {
-            // 非中止错误：把分片放回队列，显示错误（将被下一轮重传）
             pendingPartsRef.current.add(partNumber);
             setError(err instanceof Error ? err.message : String(err));
           }
         });
-        // 若当前分片仍在队列，避免被并发重复启动
         pendingPartsRef.current.delete(partNumber);
       }
       if (active === 0 && pendingPartsRef.current.size === 0) {
@@ -201,10 +274,6 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     if (!info) return;
     setStatus("合并分片...");
 
-    // 需列出所有已上传分片并排序
-    const listed = await listUploadedParts(info.key, info.uploadId);
-    const parts = Array.from(listed.partNumbers).sort((a, b) => a - b).map(n => ({ PartNumber: n }));
-    // AWS 需要 ETag，但我们没有缓存 ETag；简化起见，重新列出包含 ETag 的结构
     const res = await fetch("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) });
     const data = await res.json() as { parts: { PartNumber: number; ETag: string }[] };
     const completeRes = await fetch("/api/s3/multipart/complete", {
@@ -214,28 +283,43 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     });
     if (!completeRes.ok) throw new Error(await completeRes.text());
 
-    setStatus("完成");
-    setUploading(false);
-    controllerRef.current = null;
-
-    // 清理 session
     const file = info.file!;
     localStorage.removeItem(`uploader:session:${getFingerprint(file)}`);
 
+    try {
+      setStatus("生成封面...");
+      const poster = await generatePosterFromFile(file, 1.5);
+      setStatus("上传封面...");
+      const base = info.key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "poster";
+      await uploadPosterBlob(base, poster);
+    } catch { }
+
     try { await fetch("/api/s3/videos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key }) }); } catch { }
 
+    setStatus("完成");
+    setUploading(false);
+    if (activeIdx !== null) {
+      setQueue(prev => prev.map((it, i) => i === activeIdx ? { ...it, status: "done", key: info.key, progress: 100 } : it));
+      show({ kind: "success", title: "上传完成", description: queue[activeIdx]?.name });
+    }
+    currentUploadRef.current = null;
+    controllerRef.current = null;
+
     onCompleted?.({ key: info.key });
+
+    // 处理下一个
+    processNext();
   }
 
   const onInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) void startOrResumeUpload(file);
+    const files = e.target.files;
+    if (files && files.length > 0) enqueueFiles(Array.from(files));
   }, []);
 
   const onDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (file) void startOrResumeUpload(file);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) enqueueFiles(files);
   }, []);
 
   const onDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => e.preventDefault(), []);
@@ -244,13 +328,18 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     setPaused(true);
     controllerRef.current?.abort();
     setStatus("已暂停");
-  }, []);
+    if (activeIdx !== null) setQueue(prev => prev.map((it, i) => i === activeIdx ? { ...it, status: "paused" } : it));
+  }, [activeIdx]);
 
   const onResume = useCallback(() => {
-    if (!currentUploadRef.current?.file) return;
+    if (!currentUploadRef.current?.file) {
+      processNext();
+      return;
+    }
+    if (activeIdx !== null) setQueue(prev => prev.map((it, i) => i === activeIdx ? { ...it, status: "uploading" } : it));
     setPaused(false);
     void runUploadLoop();
-  }, []);
+  }, [activeIdx]);
 
   const onCancel = useCallback(async () => {
     controllerRef.current?.abort();
@@ -261,19 +350,25 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       try { await fetch("/api/s3/multipart/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }); } catch { }
       if (info.file) localStorage.removeItem(`uploader:session:${getFingerprint(info.file)}`);
     }
+    currentUploadRef.current = null;
     controllerRef.current = null;
-  }, []);
+    if (activeIdx !== null) setQueue(prev => prev.map((it, i) => i === activeIdx ? { ...it, status: "error", message: "已取消" } : it));
+    processNext();
+  }, [activeIdx]);
 
   return (
     <div style={{ border: "1px dashed #cbd5e1", padding: 16, borderRadius: 12, background: "#fafafa" }} onDrop={onDrop} onDragOver={onDragOver}>
       <label htmlFor="enterprise-video-input" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}>选择视频</label>
-      <input id="enterprise-video-input" ref={inputRef} type="file" accept={accept} style={{ display: "none" }} onChange={onInput} title="选择视频文件" />
+      <input id="enterprise-video-input" ref={inputRef} type="file" multiple accept={accept} style={{ display: "none" }} onChange={onInput} title="选择视频文件" />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontWeight: 600 }}>企业级视频上传</div>
-          <div style={{ fontSize: 12, color: "#6b7280" }}>支持多分片/并发/断点续传/拖拽/取消</div>
+          <div style={{ fontSize: 12, color: "#6b7280" }}>支持多分片/并发/断点续传/拖拽/取消/多文件队列</div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: '#6b7280' }}>并发</span>
+          <input type="range" aria-label="并发数" title="并发数" min={1} max={10} value={curConcurrency} onChange={(e) => setCurConcurrency(Number(e.target.value))} />
+          <span style={{ width: 16, textAlign: 'right', fontSize: 12 }}>{curConcurrency}</span>
           {!uploading && <button onClick={() => inputRef.current?.click()} style={{ background: "#111827", color: "white", padding: "8px 12px", borderRadius: 8 }}>选择文件</button>}
           {uploading && !paused && <button onClick={onPause} style={{ background: "#f3f4f6", color: "#111827", padding: "8px 12px", borderRadius: 8 }}>暂停</button>}
           {uploading && paused && <button onClick={onResume} style={{ background: "#10b981", color: "white", padding: "8px 12px", borderRadius: 8 }}>继续</button>}
@@ -291,6 +386,27 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
         </div>
         {error && <div style={{ marginTop: 8, color: "#b91c1c" }}>{error}</div>}
       </div>
+
+      {queue.length > 0 && (
+        <div style={{ marginTop: 12, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+          <div style={{ padding: 8, fontWeight: 600, background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>上传队列</div>
+          <ul style={{ listStyle: "none", margin: 0, padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {queue.map((it, i) => (
+              <li key={`${it.name}-${i}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: 14 }}>{it.name}</span>
+                  <span style={{ fontSize: 12, color: '#6b7280' }}>{it.status}{it.message ? ` · ${it.message}` : ''}</span>
+                </div>
+                <div style={{ minWidth: 160 }}>
+                  <div style={{ height: 6, background: "#e5e7eb", borderRadius: 4 }}>
+                    <div style={{ width: `${it.progress}%`, height: 6, background: i === activeIdx ? "#22c55e" : "#9ca3af", borderRadius: 4 }} />
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 } 

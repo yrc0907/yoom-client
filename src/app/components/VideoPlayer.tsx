@@ -1,7 +1,8 @@
 "use client";
-
+/* eslint-disable */
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
+import "plyr/dist/plyr.css";
 
 export type VideoPlayerProps = {
   src: string;
@@ -16,12 +17,9 @@ export type VideoPlayerProps = {
 export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRefreshUrl, style, storageId }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const plyrRef = useRef<any | null>(null);
   const [currentSrc, setCurrentSrc] = useState(src);
-  const [pipReady, setPipReady] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [levels, setLevels] = useState<{ index: number; label: string }[]>([]);
-  const [selectedLevel, setSelectedLevel] = useState<number>(-1);
 
   const timeKey = storageId ? `vp:last:${storageId}` : undefined;
 
@@ -30,26 +28,20 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
     setErrorMsg(null);
   }, [src]);
 
-  // 初始化/切换资源
+  // 初始化/切换资源 + Plyr 控件（仅在浏览器端执行）
   useEffect(() => {
+    if (typeof window === "undefined") return; // SSR 保护
     const video = videoRef.current;
     if (!video) return;
 
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
-    }
-
-    setPipReady(false);
-    setLevels([]);
-    setSelectedLevel(-1);
+    // 清理旧实例
+    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    if (plyrRef.current) { plyrRef.current.destroy(); plyrRef.current = null; }
 
     const isHls = currentSrc.endsWith(".m3u8");
-
     video.crossOrigin = "anonymous";
 
     function onLoadedMetadata() {
-      setPipReady(Boolean((document as any).pictureInPictureEnabled));
       if (timeKey) {
         const saved = Number(localStorage.getItem(timeKey) || 0);
         if (Number.isFinite(saved) && saved > 1 && video.duration && saved < video.duration - 1) {
@@ -57,62 +49,64 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
         }
       }
     }
-    function onTimeUpdate() {
-      if (timeKey) localStorage.setItem(timeKey, String(Math.floor(video.currentTime)));
-    }
-    function onEmptied() { setPipReady(false); }
+    function onTimeUpdate() { if (timeKey) localStorage.setItem(timeKey, String(Math.floor(video.currentTime))); }
     function onError() { setErrorMsg("视频加载失败，请稍后重试"); }
 
     video.addEventListener("loadedmetadata", onLoadedMetadata);
     video.addEventListener("timeupdate", onTimeUpdate);
-    video.addEventListener("emptied", onEmptied);
     video.addEventListener("error", onError);
 
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
       hlsRef.current = hls;
       hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        hls.loadSource(currentSrc);
-      });
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        const lvls = hls.levels.map((l, i) => ({ index: i, label: `${Math.round(l.bitrate / 1000)} kbps` }));
-        setLevels([{ index: -1, label: "自动" }, ...lvls]);
-        setSelectedLevel(hls.currentLevel);
-      });
-      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => setSelectedLevel(data.level));
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(currentSrc));
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (data.fatal) {
-          if (onRequestRefreshUrl) {
-            onRequestRefreshUrl().then((u) => setCurrentSrc(u)).catch(() => setErrorMsg("播放出错"));
-          } else {
-            setErrorMsg("播放出错");
-          }
+          if (onRequestRefreshUrl) onRequestRefreshUrl().then((u) => setCurrentSrc(u)).catch(() => setErrorMsg("播放出错"));
+          else setErrorMsg("播放出错");
         }
       });
-      return () => {
-        hls.destroy();
-        hlsRef.current = null;
-        video.removeEventListener("loadedmetadata", onLoadedMetadata);
-        video.removeEventListener("timeupdate", onTimeUpdate);
-        video.removeEventListener("emptied", onEmptied);
-        video.removeEventListener("error", onError);
-      };
     } else {
       video.src = currentSrc;
       video.preload = "metadata";
-      return () => {
-        video.removeEventListener("loadedmetadata", onLoadedMetadata);
-        video.removeEventListener("timeupdate", onTimeUpdate);
-        video.removeEventListener("emptied", onEmptied);
-        video.removeEventListener("error", onError);
-      };
     }
-  }, [currentSrc, onRequestRefreshUrl, timeKey]);
 
-  useEffect(() => {
-    const v = videoRef.current; if (!v) return; v.playbackRate = playbackRate;
-  }, [playbackRate]);
+    let destroyed = false;
+    (async () => {
+      try {
+        const PlyrMod = await import("plyr");
+        if (destroyed) return;
+        const plyr = new PlyrMod.default(video, {
+          controls: [
+            "play-large",
+            "play",
+            "progress",
+            "current-time",
+            "mute",
+            "volume",
+            "settings",
+            "pip",
+            "airplay",
+            "fullscreen",
+          ],
+          settings: ["speed"],
+          speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
+          i18n: { play: "播放", pause: "暂停", mute: "静音", unmute: "取消静音", fullscreen: "全屏", settings: "设置", speed: "倍速", pip: "画中画" },
+        });
+        plyrRef.current = plyr;
+      } catch { }
+    })();
+
+    return () => {
+      destroyed = true;
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      if (plyrRef.current) { plyrRef.current.destroy(); plyrRef.current = null; }
+      video.removeEventListener("loadedmetadata", onLoadedMetadata);
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("error", onError);
+    };
+  }, [currentSrc, onRequestRefreshUrl, timeKey]);
 
   // 过期前自动续签
   useEffect(() => {
@@ -131,40 +125,8 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
     return () => clearTimeout(timer);
   }, [expiresAt, onRequestRefreshUrl]);
 
-  // 快捷键
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        if (video.paused) void video.play(); else video.pause();
-      } else if (e.key === "ArrowRight") {
-        video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5);
-      } else if (e.key === "ArrowLeft") {
-        video.currentTime = Math.max(0, video.currentTime - 5);
-      } else if (e.key === "ArrowUp") {
-        video.volume = Math.min(1, video.volume + 0.1);
-      } else if (e.key === "ArrowDown") {
-        video.volume = Math.max(0, video.volume - 0.1);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  async function enterPiP() {
-    const video = videoRef.current;
-    if (!video) return;
-    try {
-      if ((document as any).pictureInPictureEnabled && video.readyState >= 1) {
-        await (video as any).requestPictureInPicture();
-      }
-    } catch { }
-  }
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+    <div className="plyr__video-embed" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {title && <div style={{ fontSize: 12, color: "#6b7280" }}>{title}</div>}
       <video
         ref={videoRef}
@@ -174,24 +136,7 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
         crossOrigin="anonymous"
         style={{ width: "100%", borderRadius: 8, background: "#000", ...style }}
       />
-      <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "#6b7280" }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <label>倍速</label>
-          <select value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))} style={{ padding: "2px 6px", borderRadius: 6 }}>
-            {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(r => <option key={r} value={r}>{r}x</option>)}
-          </select>
-          {levels.length > 0 && (
-            <>
-              <label>清晰度</label>
-              <select value={selectedLevel} onChange={(e) => { const l = Number(e.target.value); setSelectedLevel(l); if (hlsRef.current) hlsRef.current.currentLevel = l; }} style={{ padding: "2px 6px", borderRadius: 6 }}>
-                {levels.map(l => <option key={l.index} value={l.index}>{l.label}</option>)}
-              </select>
-            </>
-          )}
-        </div>
-        <button onClick={enterPiP} disabled={!pipReady} style={{ background: pipReady ? "#f3f4f6" : "#e5e7eb", padding: "4px 8px", borderRadius: 6 }}>画中画</button>
-      </div>
       {errorMsg && <div style={{ color: "#b91c1c", fontSize: 12 }}>{errorMsg}</div>}
     </div>
   );
-} 
+}

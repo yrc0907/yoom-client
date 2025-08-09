@@ -2,10 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import VideoPlayer from "@/app/components/VideoPlayer";
+import HoverVideo from "@/app/components/HoverVideo";
 
 type VideoItem = {
   key: string;
   url: string;
+  hlsUrl?: string | null;
+  posterUrl?: string | null;
   size?: number;
   lastModified?: string;
 };
@@ -22,6 +25,7 @@ export default function VideoGallery() {
   const [error, setError] = useState<string | null>(null);
   const [nextToken, setNextToken] = useState<string | null>(null);
   const [expires, setExpires] = useState<number>(600);
+  const [openedKey, setOpenedKey] = useState<string | null>(null);
 
   const limit = useMemo(() => 12, []);
 
@@ -32,6 +36,7 @@ export default function VideoGallery() {
       const url = new URL("/api/s3/videos", window.location.origin);
       url.searchParams.set("limit", String(limit));
       url.searchParams.set("expires", "600");
+      url.searchParams.set("includeHls", "1");
       if (token) url.searchParams.set("token", token);
 
       const res = await fetch(url.toString(), { cache: "no-store" });
@@ -78,46 +83,39 @@ export default function VideoGallery() {
         style={{
           marginTop: 12,
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
           gap: 12,
         }}
       >
-        {items.map((it) => (
-          <div key={it.key} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
-            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{it.key.split("/").at(-1)}</span>
-              <button onClick={() => { navigator.clipboard.writeText(it.url); }} style={{ fontSize: 12, background: '#f3f4f6', padding: '2px 6px', borderRadius: 6 }}>复制链接</button>
-            </div>
-            <VideoPlayer
-              src={it.url}
-              title={it.key.split("/").at(-1)}
-              storageId={it.key}
-              expiresAt={Date.now() + expires * 1000}
-              onRequestRefreshUrl={async () => {
-                const u = new URL("/api/s3/signed-url", window.location.origin);
-                u.searchParams.set("key", it.key);
-                u.searchParams.set("expires", String(expires));
-                const res = await fetch(u.toString());
-                if (!res.ok) throw new Error(await res.text());
-                const data = (await res.json()) as { url: string };
-                return data.url;
-              }}
-            />
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-              <a href={it.url} target="_blank" rel="noreferrer" style={{ color: "#2563eb", fontSize: 14 }}>
-                新标签打开
-              </a>
-              {it.lastModified && (
-                <span style={{ color: "#6b7280", fontSize: 12 }}>
-                  {new Date(it.lastModified).toLocaleString()}
-                </span>
+        {items.map((it) => {
+          const playing = openedKey === it.key;
+          return (
+            <div key={it.key} style={{ borderRadius: 10, overflow: "hidden", background: "#000" }}>
+              {playing ? (
+                <VideoPlayer
+                  src={it.hlsUrl || it.url}
+                  storageId={it.key}
+                  poster={it.posterUrl || undefined}
+                  expiresAt={Date.now() + expires * 1000}
+                  onRequestRefreshUrl={async () => {
+                    const u = new URL("/api/s3/signed-url", window.location.origin);
+                    u.searchParams.set("key", it.key);
+                    u.searchParams.set("expires", String(expires));
+                    const res = await fetch(u.toString());
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = (await res.json()) as { url: string };
+                    return data.url;
+                  }}
+                />
+              ) : (
+                <HoverVideo src={it.hlsUrl || it.url} poster={it.posterUrl || undefined} onClick={() => setOpenedKey(it.key)} />
               )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div style={{ marginTop: 12 }}>
+      <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
         {nextToken && (
           <button
             onClick={() => load(nextToken)}
@@ -136,4 +134,4 @@ export default function VideoGallery() {
       </div>
     </section>
   );
-} 
+}

@@ -3,6 +3,19 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Plyr theme overrides */
+  --plyr-color-main: #2563eb; /* 主色：蓝 */
+  --plyr-video-controls-background: rgba(15, 23, 42, 0.65);
+  --plyr-video-control-color: #e5e7eb;
+  --plyr-control-icon-size: 18px;
+  --plyr-control-spacing: 10px;
+  --plyr-range-thumb-height: 10px;
+  --plyr-range-track-height: 4px;
+  --plyr-tooltip-background: rgba(17, 24, 39, 0.9);
+  --plyr-tooltip-color: #f9fafb;
+  --plyr-badge-background: #111827;
+  --plyr-badge-text-color: #f9fafb;
 }
 
 @theme inline {
@@ -16,6 +29,9 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    --plyr-video-controls-background: rgba(0, 0, 0, 0.55);
+    --plyr-tooltip-background: rgba(0, 0, 0, 0.85);
   }
 }
 
