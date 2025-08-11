@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "./ToastCenter";
 
 export type EnterpriseUploaderProps = {
@@ -9,6 +9,17 @@ export type EnterpriseUploaderProps = {
   concurrency?: number; // 默认 4
   onCompleted?: (payload: { key: string }) => void;
 };
+
+function getDefaultConcurrency(): number {
+  const nav = (typeof navigator !== "undefined" ? navigator : undefined) as (Navigator & { hardwareConcurrency?: number }) | undefined;
+  const hc = typeof nav?.hardwareConcurrency === "number" ? nav.hardwareConcurrency : undefined;
+  return Math.min(6, Math.max(3, hc ? Math.ceil(hc / 2) : 4));
+}
+
+function getEffectiveConnectionType(): string | undefined {
+  const nav = (typeof navigator !== "undefined" ? navigator : undefined) as (Navigator & { connection?: { effectiveType?: string } }) | undefined;
+  return nav?.connection?.effectiveType;
+}
 
 // 简单指数退避
 async function retry<T>(fn: () => Promise<T>, retries = 5, base = 500): Promise<T> {
@@ -74,7 +85,7 @@ async function uploadPosterBlob(baseName: string, blob: Blob): Promise<string> {
   return key;
 }
 
-export default function EnterpriseUploader({ accept = "video/*", partSizeBytes = 8 * 1024 * 1024, concurrency = Math.min(6, Math.max(3, (navigator as any)?.hardwareConcurrency ? Math.ceil((navigator as any).hardwareConcurrency / 2) : 4)), onCompleted }: EnterpriseUploaderProps) {
+export default function EnterpriseUploader({ accept = "video/*", partSizeBytes = 8 * 1024 * 1024, concurrency = getDefaultConcurrency(), onCompleted }: EnterpriseUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const { show } = useToast();
 
@@ -109,7 +120,45 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   const lastTickRef = useRef<number>(0);
   const lastBytesRef = useRef<number>(0);
 
-  const pick = useCallback(() => inputRef.current?.click(), []);
+  // CRC32C Web Worker
+  const crcWorkerRef = useRef<Worker | null>(null);
+  const nextWorkerMessageIdRef = useRef<number>(1);
+  const workerPromisesRef = useRef<Map<number, { resolve: (v: string) => void; reject: (e: unknown) => void }>>(new Map());
+
+  useEffect(() => {
+    // Lazily initialize the worker on first mount
+    if (typeof window !== "undefined" && !crcWorkerRef.current) {
+      try {
+        const worker = new Worker(new URL("../../workers/crc32c.worker.ts", import.meta.url), { type: "module" });
+        worker.onmessage = (ev: MessageEvent) => {
+          const { id, base64 } = ev.data as { id: number; base64: string };
+          const entry = workerPromisesRef.current.get(id);
+          if (entry) {
+            workerPromisesRef.current.delete(id);
+            entry.resolve(base64);
+          }
+        };
+        worker.onerror = (ev) => {
+          // Reject all pending requests on worker error
+          const err = new Error(`CRC32C worker error: ${ev.message}`);
+          for (const [, entry] of workerPromisesRef.current) entry.reject(err);
+          workerPromisesRef.current.clear();
+        };
+        crcWorkerRef.current = worker;
+      } catch {
+        crcWorkerRef.current = null;
+      }
+    }
+    return () => {
+      if (crcWorkerRef.current) {
+        crcWorkerRef.current.terminate();
+        crcWorkerRef.current = null;
+      }
+      workerPromisesRef.current.clear();
+    };
+  }, []);
+
+  // pick 函数无需导出，使用处已内联调用 inputRef
 
   async function listUploadedParts(key: string, uploadId: string): Promise<{ partNumbers: Set<number>; uploadedBytes: number }> {
     const res = await fetch("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, uploadId }) });
@@ -181,7 +230,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       key = init.key; uploadId = init.uploadId; chunkSize = init.partSize || partSizeBytes;
       // 弱网优先更小分片，强网可保持/略增（S3 最小 5MB）
       try {
-        const et = (navigator as any)?.connection?.effectiveType as string | undefined;
+        const et = getEffectiveConnectionType();
         const ONE_MB = 1024 * 1024;
         const minChunk = 5 * ONE_MB;
         if (et && ["2g", "slow-2g", "3g"].includes(et)) {
@@ -220,26 +269,25 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     lastTickRef.current = performance.now();
     lastBytesRef.current = uploadedBytesRef.current;
 
-    // 计算 crc32c（RFC 4960 多项式，输出 base64）
+    // 计算 crc32c（在 Web Worker 中执行，输出 base64）
     async function crc32cBase64(blob: Blob): Promise<string> {
+      const worker = crcWorkerRef.current;
       const buffer = await blob.arrayBuffer();
-      // 轻量实现：使用 WebAssembly/内置 API 不可用时，退回 JS 表；为避免体积，这里用简易版。
-      // 生成查表
-      const table = new Uint32Array(256);
-      const poly = 0x82F63B78; // Castagnoli
-      for (let i = 0; i < 256; i++) {
-        let c = i;
-        for (let k = 0; k < 8; k++) c = (c & 1) ? (poly ^ (c >>> 1)) : (c >>> 1);
-        table[i] = c >>> 0;
+      // 无可用 worker 时，简单回退：不带校验（不发送校验头）
+      if (!worker) {
+        return "";
       }
-      let crc = 0xFFFFFFFF;
-      const view = new Uint8Array(buffer);
-      for (let i = 0; i < view.length; i++) crc = table[(crc ^ view[i]) & 0xFF] ^ (crc >>> 8);
-      crc = (crc ^ 0xFFFFFFFF) >>> 0;
-      // 转大端字节序再 base64
-      const b = new Uint8Array(4);
-      b[0] = (crc >>> 24) & 0xFF; b[1] = (crc >>> 16) & 0xFF; b[2] = (crc >>> 8) & 0xFF; b[3] = crc & 0xFF;
-      return btoa(String.fromCharCode(...b));
+      const id = nextWorkerMessageIdRef.current++;
+      return new Promise<string>((resolve, reject) => {
+        workerPromisesRef.current.set(id, { resolve, reject });
+        try {
+          // Transfer the buffer to avoid copy
+          worker.postMessage({ id, buffer }, [buffer]);
+        } catch (e) {
+          workerPromisesRef.current.delete(id);
+          reject(e);
+        }
+      });
     }
 
     async function md5Base64(blob: Blob): Promise<string> {
@@ -261,17 +309,16 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       const signRes = await fetch("/api/s3/multipart/sign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, uploadId, partNumber, checksumCRC32C, contentMD5: contentMD5 || undefined }),
+        // 为避免与预签名的 SignedHeaders 不一致导致 403，这里不再通过服务器签名校验参数
+        body: JSON.stringify({ key, uploadId, partNumber }),
       });
       if (!signRes.ok) throw new Error(await signRes.text());
       const { url } = await signRes.json() as { url: string };
 
       const t0 = performance.now();
       await retry(async () => {
-        const headers: Record<string, string> = {};
-        if (checksumCRC32C) headers["x-amz-checksum-crc32c"] = checksumCRC32C;
-        if (contentMD5) headers["Content-MD5"] = contentMD5;
-        const res = await fetch(url, { method: "PUT", body: blob, headers, signal: controller.signal });
+        // 重要：不要在客户端设置 x-amz- 开头的校验头，否则与预签名的 SignedHeaders 不匹配会导致 403
+        const res = await fetch(url, { method: "PUT", body: blob, signal: controller.signal });
         if (!res.ok) throw new Error(`上传分片失败 ${partNumber}: ${res.status}`);
       });
       const rtt = performance.now() - t0;
@@ -351,7 +398,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       // 滚动窗口清零失败计数，RTT 留作趋势
       m.failures = 0;
       m.successes = 0;
-    }, 2000) as any;
+    }, 2000);
   }
 
   async function completeUpload() {
