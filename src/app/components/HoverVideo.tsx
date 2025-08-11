@@ -49,7 +49,7 @@ export default function HoverVideo({ src, previewSrc, preview360Src, animSrc, th
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-    function onTime() { if (!el.duration) return; setProgress((el.currentTime / el.duration) * 100); }
+    function onTime() { if (!el?.duration) return; setProgress((el.currentTime / el.duration) * 100); }
     function onLoaded() { setMp4Ready(true); if (Date.now() >= handoverAllowedAt) { setShowAnim(false); } }
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("canplay", onLoaded);
@@ -64,7 +64,7 @@ export default function HoverVideo({ src, previewSrc, preview360Src, animSrc, th
 
   function ensureLoadedAndPlay() {
     const el = videoRef.current; if (!el) return;
-    if (!activeSrc) setActiveSrc(selectPreview());
+    if (!activeSrc) setActiveSrc(selectPreview() || null);
     queueMicrotask(() => { const v = videoRef.current; if (!v) return; playWhenReady(v); });
   }
 
@@ -122,7 +122,7 @@ export default function HoverVideo({ src, previewSrc, preview360Src, animSrc, th
         if (e.isIntersecting && e.intersectionRatio > 0.25) {
           const el = videoRef.current; if (!el) break;
           if (!hasPrefetched) {
-            if (!activeSrc) setActiveSrc(selectPreview());
+            if (!activeSrc) setActiveSrc(selectPreview() || null);
             queueMicrotask(() => { const v = videoRef.current; if (!v) return; v.preload = "metadata"; try { v.load(); } catch { }; setHasPrefetched(true); });
           }
           break;

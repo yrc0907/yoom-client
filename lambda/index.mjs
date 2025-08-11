@@ -17,9 +17,21 @@ const MAX_FRAMES = Number(process.env.MAX_FRAMES || 300);
 const ffmpegPath = process.env.FFMPEG_PATH || "/opt/bin/ffmpeg";
 
 export const handler = async (event) => {
-  const rec = event?.Records?.[0];
-  if (!rec) return;
-  const key = decodeURIComponent(rec.s3.object.key.replace(/\+/g, " "));
+  // 支持 S3 Put 触发或 SQS 转发的事件
+  let key;
+  if (event?.Records && Array.isArray(event.Records) && event.Records.length > 0) {
+    const r0 = event.Records[0];
+    if (r0.eventSource === 'aws:s3' && r0.s3?.object?.key) {
+      key = decodeURIComponent(r0.s3.object.key.replace(/\+/g, " "));
+    } else if (r0.eventSource === 'aws:sqs') {
+      try {
+        const body = JSON.parse(r0.body || '{}');
+        // 兼容通过 SQS 传入 { key }
+        if (body && body.key) key = body.key;
+      } catch { }
+    }
+  }
+  if (!key) return;
   if (!key.startsWith(IN_PREFIX) || !key.endsWith(".mp4")) return;
 
   const base = path.basename(key).replace(/\.[^.]+$/, "");
