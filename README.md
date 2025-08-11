@@ -1,5 +1,5 @@
 如何启动
-环境变量
+1.设置环境变量
 ```
 AWS_REGION=
 S3_BUCKET_NAME=
@@ -13,3 +13,5 @@ MEDIACONVERT_ENDPOINT=
 NEXT_PUBLIC_BASE_URL = 
 FFMPEG_PATH=
 ```
+2.将lambda中的funtions上传到aws中lambda。
+3.配置lambda触发器。
