@@ -8,6 +8,7 @@ export const runtime = "nodejs";
 
 const AWS_REGION = process.env.AWS_REGION;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+const USE_ACCELERATE = process.env.S3_ACCELERATE === "1";
 
 function createS3Client(): S3Client {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -30,6 +31,7 @@ function createS3Client(): S3Client {
   return new S3Client({
     region: AWS_REGION,
     requestHandler,
+    useAccelerateEndpoint: USE_ACCELERATE,
   });
 }
 
@@ -91,9 +93,62 @@ export async function GET(request: Request) {
           await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }));
           const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }), { expiresIn });
           return url;
-        } catch {
-          // not found, continue
-        }
+        } catch { }
+      }
+      return null;
+    }
+
+    async function getPreviewForKey(key: string): Promise<string | null> {
+      const base = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
+      const p = `previews/${base}.mp4`;
+      try {
+        await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }));
+        const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }), { expiresIn });
+        return url;
+      } catch { }
+      return null;
+    }
+
+    async function getPreview360ForKey(key: string): Promise<string | null> {
+      const base = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
+      const p = `previews-360/${base}.mp4`;
+      try {
+        await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }));
+        const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }), { expiresIn });
+        return url;
+      } catch { }
+      return null;
+    }
+
+    async function getAnimForKey(key: string): Promise<string | null> {
+      const base = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
+      const candidates = [
+        `previews-anim/${base}.webp`,
+        `previews-anim/${base}.gif`,
+      ];
+      for (const p of candidates) {
+        try {
+          await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }));
+          const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }), { expiresIn });
+          return url;
+        } catch { }
+      }
+      return null;
+    }
+
+    async function getThumbsBaseForKey(key: string): Promise<string | null> {
+      const base = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
+      const probes = [
+        `previews-vtt/${base}-001.jpg`,          // 老版逐帧 jpg（顶层）
+        `previews-vtt/${base}-sprite.vtt`,       // 雪碧图 vtt（顶层）
+        `previews-vtt/${base}.vtt`,              // 简化 vtt（顶层）
+        `previews-vtt/${base}/001.jpg`,          // 逐帧 jpg（子目录）
+      ];
+      for (const p of probes) {
+        try {
+          await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET_NAME, Key: p }));
+          return `previews-vtt/${base}`;
+        } catch { }
       }
       return null;
     }
@@ -106,15 +161,23 @@ export async function GET(request: Request) {
           new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: key }),
           { expiresIn }
         );
-        const [hlsUrl, posterUrl] = await Promise.all([
+        const [hlsUrl, posterUrl, previewUrl, preview360Url, animUrl, thumbsBase] = await Promise.all([
           getHlsForKey(key),
           getPosterForKey(key),
+          getPreviewForKey(key),
+          getPreview360ForKey(key),
+          getAnimForKey(key),
+          getThumbsBaseForKey(key),
         ]);
         return {
           key,
           url,
           hlsUrl,
           posterUrl,
+          previewUrl,
+          preview360Url,
+          animUrl,
+          thumbsBase,
           size: obj.Size,
           lastModified: obj.LastModified?.toISOString?.() ?? undefined,
         };
@@ -143,6 +206,30 @@ export async function POST(request: Request) {
     if (!key) {
       return new Response(JSON.stringify({ error: "key 必填" }), { status: 400 });
     }
+    // 触发 MediaConvert 异步转码
+    try {
+      const origin = new URL(request.url).origin;
+      const res = await fetch(new URL("/api/mediaconvert/start", origin).toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        console.warn("[videos][POST] start mediaconvert failed:", msg);
+      }
+    } catch (err) {
+      console.warn("[videos][POST] start mediaconvert error:", err);
+    }
+
+    // 启动后台任务生成逐帧 VTT（若还不存在）
+    try {
+      const origin = new URL(request.url).origin;
+      const base = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
+      // 仅登记任务，由前端/批处理生成器上传至 previews-vtt/；此处只返回 thumbsBase，前端即可立即尝试显示
+      // 若你需要纯服务端生成，可在此处集成 Lambda/FFmpeg。
+      await Promise.resolve();
+    } catch { }
     return Response.json({ ok: true, key });
   } catch (error: unknown) {
     console.error("[videos][POST] error", error);

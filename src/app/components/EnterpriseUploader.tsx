@@ -74,7 +74,7 @@ async function uploadPosterBlob(baseName: string, blob: Blob): Promise<string> {
   return key;
 }
 
-export default function EnterpriseUploader({ accept = "video/*", partSizeBytes = 8 * 1024 * 1024, concurrency = 4, onCompleted }: EnterpriseUploaderProps) {
+export default function EnterpriseUploader({ accept = "video/*", partSizeBytes = 8 * 1024 * 1024, concurrency = Math.min(6, Math.max(3, (navigator as any)?.hardwareConcurrency ? Math.ceil((navigator as any).hardwareConcurrency / 2) : 4)), onCompleted }: EnterpriseUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const { show } = useToast();
 
@@ -165,7 +165,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       const initRes = await fetch("/api/s3/multipart/initiate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName: file.name, fileType: file.type }),
+        body: JSON.stringify({ fileName: file.name, fileType: file.type, fileSize: file.size }),
       });
       if (!initRes.ok) throw new Error(await initRes.text());
       const init = await initRes.json() as { key: string; uploadId: string; partSize: number };
@@ -292,6 +292,8 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       setStatus("上传封面...");
       const base = info.key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "poster";
       await uploadPosterBlob(base, poster);
+      // 预览由后端 Lambda/MediaConvert 生成，前端不再参与
+      setStatus("已提交后台生成预览...");
     } catch { }
 
     try { await fetch("/api/s3/videos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key }) }); } catch { }

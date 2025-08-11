@@ -1,0 +1,57 @@
+services:
+  preview:
+    image: jrottenberg/ffmpeg:6.0-ubuntu
+    working_dir: /work
+    volumes:
+      - ../../:/work
+    environment:
+      IN_DIR: uploads/videos
+      OUT_DIR: previews
+      SCALE_HEIGHT: "480"
+      VIDEO_BR: "600k"
+      VIDEO_MAX: "800k"
+      VIDEO_BUF: "1200k"
+      AUDIO_BR: "96k"
+    entrypoint: ["/bin/sh", "-lc"]
+    command: "/work/tools/preview-docker/run.sh"
+
+  anim:
+    image: jrottenberg/ffmpeg:6.0-ubuntu
+    working_dir: /work
+    volumes:
+      - ../../:/work
+    environment:
+      IN_DIR: uploads/videos
+      OUT_DIR: previews-anim
+      SCALE_HEIGHT: "360"
+      FPS: "8"
+    entrypoint: ["/bin/sh", "-lc"]
+    command: "/work/tools/preview-docker/run-anim.sh"
+
+  vtt:
+    image: jrottenberg/ffmpeg:6.0-ubuntu
+    working_dir: /work
+    volumes:
+      - ../../:/work
+    environment:
+      IN_DIR: /work/uploads/videos
+      OUT_DIR: /work/previews-vtt
+      SCALE_WIDTH: "240"
+      INTERVAL: "2" # 每 2 秒一帧
+    entrypoint: ["/bin/sh", "-lc"]
+    command: "/work/tools/preview-docker/run-vtt.sh"
+
+  sprite:
+    image: jrottenberg/ffmpeg:6.0-ubuntu
+    working_dir: /work
+    volumes:
+      - ../../:/work
+    environment:
+      IN_DIR: /work/uploads/videos
+      OUT_DIR: /work/previews-vtt
+      SCALE_WIDTH: "240"
+      INTERVAL: "2"
+      COLS: "10"
+      ROWS: "10" # 总计 100 帧（~200s 覆盖）
+    entrypoint: ["/bin/sh", "-lc"]
+    command: "/work/tools/preview-docker/run-sprite.sh"

@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 
 const AWS_REGION = process.env.AWS_REGION;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+const USE_ACCELERATE = process.env.S3_ACCELERATE === "1";
 
 function createS3Client(): S3Client {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -16,7 +17,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, requestHandler });
+  return new S3Client({ region: AWS_REGION, requestHandler, useAccelerateEndpoint: USE_ACCELERATE });
 }
 
 const s3 = createS3Client();
@@ -39,6 +40,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const fileName: string | undefined = body.fileName;
     const fileType: string | undefined = body.fileType;
+    const fileSize: number | undefined = body.fileSize;
 
     if (!fileName || !fileType || !fileType.startsWith("video/")) {
       return new Response(JSON.stringify({ error: "fileName 和 video 类型必填" }), { status: 400 });
@@ -55,8 +57,17 @@ export async function POST(request: Request) {
       return new Response(JSON.stringify({ error: "Failed to initiate multipart upload" }), { status: 500 });
     }
 
-    // 建议分片大小（8MB）
-    const partSize = 8 * 1024 * 1024;
+    // 根据文件大小动态建议分片大小：保证分片数 <= 10,000，且不低于 8MB（亦满足 S3 最小 5MB 要求）
+    const FIVE_MB = 5 * 1024 * 1024;
+    const EIGHT_MB = 8 * 1024 * 1024;
+    let partSize = EIGHT_MB;
+    if (typeof fileSize === "number" && fileSize > 0) {
+      const minPart = Math.ceil(fileSize / 10000);
+      partSize = Math.max(FIVE_MB, EIGHT_MB, minPart);
+      // 对齐到 1MB 边界
+      const ONE_MB = 1024 * 1024;
+      partSize = Math.ceil(partSize / ONE_MB) * ONE_MB;
+    }
 
     return Response.json({ key, uploadId: res.UploadId, partSize });
   } catch (error: unknown) {

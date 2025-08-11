@@ -12,9 +12,10 @@ export type VideoPlayerProps = {
   onRequestRefreshUrl?: () => Promise<string>;
   style?: React.CSSProperties;
   storageId?: string;
+  thumbsBase?: string | null; // e.g. previews-vtt/base 前缀的 base 名
 };
 
-export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRefreshUrl, style, storageId }: VideoPlayerProps) {
+export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRefreshUrl, style, storageId, thumbsBase }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const plyrRef = useRef<any | null>(null);
@@ -57,7 +58,13 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
     video.addEventListener("error", onError);
 
     if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
+      const hls = new Hls({
+        lowLatencyMode: true,
+        enableWorker: true,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        backBufferLength: 30,
+      });
       hlsRef.current = hls;
       hls.attachMedia(video);
       hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(currentSrc));
@@ -93,6 +100,10 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
           settings: ["speed"],
           speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
           i18n: { play: "播放", pause: "暂停", mute: "静音", unmute: "取消静音", fullscreen: "全屏", settings: "设置", speed: "倍速", pip: "画中画" },
+          previewThumbnails: thumbsBase ? {
+            enabled: true,
+            src: `/api/s3/vtt?base=${encodeURIComponent(thumbsBase)}`,
+          } : undefined,
         });
         plyrRef.current = plyr;
       } catch { }

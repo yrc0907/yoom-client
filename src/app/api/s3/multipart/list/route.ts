@@ -1,4 +1,4 @@
-import { S3Client, ListPartsCommand } from "@aws-sdk/client-s3";
+import { S3Client, ListPartsCommand, ListPartsCommandOutput } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 
 const AWS_REGION = process.env.AWS_REGION;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+const USE_ACCELERATE = process.env.S3_ACCELERATE === "1";
 
 function createS3Client(): S3Client {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -16,7 +17,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, forcePathStyle: true, requestHandler });
+  return new S3Client({ region: AWS_REGION, requestHandler, useAccelerateEndpoint: USE_ACCELERATE });
 }
 
 const s3 = createS3Client();
@@ -35,12 +36,23 @@ export async function POST(request: Request) {
     }
 
     const parts: { ETag: string; PartNumber: number; Size?: number }[] = [];
-    let partNumberMarker: number | undefined = undefined;
+    let partNumberMarker: string | undefined = undefined;
 
     // 处理分页
     while (true) {
-      const res = await s3.send(new ListPartsCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumberMarker: partNumberMarker }));
-      (res.Parts || []).forEach(p => {
+      let res: ListPartsCommandOutput;
+      try {
+        res = await s3.send(
+          new ListPartsCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumberMarker: partNumberMarker })
+        ) as ListPartsCommandOutput;
+      } catch (err: unknown) {
+        const e = err as { name?: string; Code?: string };
+        if (e?.name === "NoSuchUpload" || e?.Code === "NoSuchUpload") {
+          break;
+        }
+        throw err;
+      }
+      (res.Parts || []).forEach((p) => {
         if (p.PartNumber && p.ETag) parts.push({ ETag: p.ETag.replaceAll('"', ''), PartNumber: p.PartNumber, Size: p.Size });
       });
       if (!res.IsTruncated) break;

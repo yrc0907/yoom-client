@@ -5,8 +5,9 @@ export const runtime = "nodejs";
 
 const AWS_REGION = process.env.AWS_REGION;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+const USE_ACCELERATE = process.env.S3_ACCELERATE === "1";
 
-const s3Client = new S3Client({ region: AWS_REGION });
+const s3Client = new S3Client({ region: AWS_REGION, useAccelerateEndpoint: USE_ACCELERATE });
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "");

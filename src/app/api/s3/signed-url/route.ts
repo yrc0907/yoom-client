@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 
 const AWS_REGION = process.env.AWS_REGION;
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
+const USE_ACCELERATE = process.env.S3_ACCELERATE === "1";
 
 function createS3Client(): S3Client {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -17,7 +18,7 @@ function createS3Client(): S3Client {
   } else {
     requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
   }
-  return new S3Client({ region: AWS_REGION, requestHandler });
+  return new S3Client({ region: AWS_REGION, requestHandler, useAccelerateEndpoint: USE_ACCELERATE });
 }
 
 const s3 = createS3Client();
