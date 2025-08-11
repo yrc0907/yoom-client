@@ -1,6 +1,10 @@
 /* eslint-disable */
 import { MediaConvertClient, CreateJobCommand, DescribeEndpointsCommand } from "@aws-sdk/client-mediaconvert";
 import { buildHlsJobSettings } from "../jobTemplate";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 
 export const runtime = "nodejs";
 
@@ -9,6 +13,7 @@ const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
 const MEDIACONVERT_ROLE_ARN = process.env.MEDIACONVERT_ROLE_ARN; // 必填：授予 MediaConvert 访问 S3 的角色
 const MEDIACONVERT_QUEUE_ARN = process.env.MEDIACONVERT_QUEUE_ARN; // 可选：自定义队列
 const MEDIACONVERT_ENDPOINT = process.env.MEDIACONVERT_ENDPOINT; // 可选：如未提供将自动发现
+const JOBS_TABLE = process.env.MEDIA_JOBS_TABLE || "yoom-media-jobs";
 
 function getBaseName(key: string): string {
   const file = key.split("/").at(-1) || key;
@@ -44,14 +49,33 @@ export async function POST(request: Request) {
     const hlsDest = `s3://${S3_BUCKET_NAME}/outputs/hls/${base}-${jobId}/`;
 
     const endpoint = await getOrDiscoverEndpoint();
-    const mc = new MediaConvertClient({ region: AWS_REGION, endpoint });
+    const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    let requestHandler: NodeHttpHandler | undefined;
+    if (proxy) {
+      const agent = new HttpsProxyAgent(proxy);
+      requestHandler = new NodeHttpHandler({ httpAgent: agent, httpsAgent: agent, connectionTimeout: 5000, socketTimeout: 15000 });
+    } else {
+      requestHandler = new NodeHttpHandler({ connectionTimeout: 5000, socketTimeout: 15000 });
+    }
+    const mc = new MediaConvertClient({ region: AWS_REGION, endpoint, requestHandler });
 
-    // 使用固化模板（多码率 HLS + IBTP；低码率优先）
+    // 使用固化模板（多码率 HLS + IBTP；低码率优先）以及 CMAF HLS（可选 4K）
     const hlsTemplate = buildHlsJobSettings({ destinationS3: hlsDest });
     const jobSettings: any = {
       TimecodeConfig: { Source: "ZEROBASED" },
-      Inputs: [{ FileInput: inputUri }],
-      OutputGroups: hlsTemplate.OutputGroups,
+      Inputs: [
+        {
+          FileInput: inputUri,
+          AudioSelectors: {
+            "Audio Selector 1": {
+              DefaultSelection: "DEFAULT"
+            }
+          },
+          VideoSelector: {}
+        }
+      ],
+      // 仅输出 HLS（放弃 CMAF）
+      OutputGroups: [...hlsTemplate.OutputGroups],
     };
 
     const params: any = {
@@ -59,6 +83,7 @@ export async function POST(request: Request) {
       Settings: jobSettings,
       AccelerationSettings: { Mode: "PREFERRED" },
       StatusUpdateInterval: "SECONDS_60",
+      UserMetadata: { yoomJobId: jobId, key },
     };
     if (MEDIACONVERT_QUEUE_ARN) params.Queue = MEDIACONVERT_QUEUE_ARN;
 
@@ -95,7 +120,27 @@ export async function POST(request: Request) {
     }
     const jobArn = out?.Job?.Arn || null;
 
-    return Response.json({ ok: true, jobArn, hlsPrefix: `outputs/hls/${base}-${jobId}/` });
+    // 入库作业状态（初始 PENDING）
+    try {
+      const ddb = new DynamoDBClient({ region: AWS_REGION });
+      const doc = DynamoDBDocumentClient.from(ddb);
+      const now = new Date().toISOString();
+      await doc.send(new PutCommand({
+        TableName: JOBS_TABLE,
+        Item: {
+          jobId,
+          key,
+          status: "PENDING",
+          updatedAt: now,
+          hlsPrefix: `outputs/hls/${base}-${jobId}/`,
+          jobArn,
+        },
+      }));
+    } catch (e) {
+      console.error("[mediaconvert/start] put job failed", e);
+    }
+
+    return Response.json({ ok: true, jobArn, jobId, hlsPrefix: `outputs/hls/${base}-${jobId}/`, cmafPrefix: `outputs/cmaf/${base}-${jobId}/` });
   } catch (error: unknown) {
     console.error("[mediaconvert/start] error", error);
     const msg = error instanceof Error ? error.message : "start mediaconvert failed";

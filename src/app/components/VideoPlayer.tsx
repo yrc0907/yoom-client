@@ -45,12 +45,12 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
     function onLoadedMetadata() {
       if (timeKey) {
         const saved = Number(localStorage.getItem(timeKey) || 0);
-        if (Number.isFinite(saved) && saved > 1 && video.duration && saved < video.duration - 1) {
+        if (Number.isFinite(saved) && saved > 1 && video?.duration && saved < video.duration - 1) {
           video.currentTime = saved;
         }
       }
     }
-    function onTimeUpdate() { if (timeKey) localStorage.setItem(timeKey, String(Math.floor(video.currentTime))); }
+    function onTimeUpdate() { if (timeKey && video?.currentTime) localStorage.setItem(timeKey, String(Math.floor(video.currentTime))); }
     function onError() { setErrorMsg("视频加载失败，请稍后重试"); }
 
     video.addEventListener("loadedmetadata", onLoadedMetadata);

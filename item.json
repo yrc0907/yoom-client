@@ -1,0 +1,12 @@
+{
+  "jobId": { "S": "test-job-001" },
+  "key": { "S": "uploads/videos/2025-08-11/demo.mp4" },
+  "status": { "S": "PENDING" },
+  "updatedAt": { "S": "2025-08-11T14:30:00Z" },
+  "hlsPrefix": { "S": "outputs/hls/demo-001/" },
+  "cmafPrefix": { "S": "outputs/cmaf/demo-001/" },
+  "jobArn": {
+    "S": "arn:aws:mediaconvert:ap-southeast-2:085960855243:jobs/123456"
+  },
+  "error": { "S": "" }
+}
