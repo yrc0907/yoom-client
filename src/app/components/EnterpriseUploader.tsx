@@ -36,8 +36,29 @@ async function retry<T>(fn: () => Promise<T>, retries = 5, base = 500): Promise<
   throw lastErr;
 }
 
-function getFingerprint(file: File): string {
+function getLegacyFingerprint(file: File): string {
   return `${file.name}|${file.size}|${file.lastModified}`;
+}
+
+async function computeResumeKey(file: File): Promise<string> {
+  // sha256(head 256KB + size + tail 256KB)
+  const HEAD_BYTES = 256 * 1024;
+  const TAIL_BYTES = 256 * 1024;
+  const head = file.slice(0, Math.min(HEAD_BYTES, file.size));
+  const tailStart = file.size > TAIL_BYTES ? file.size - TAIL_BYTES : 0;
+  const tail = file.slice(tailStart, file.size);
+  const headBuf = await head.arrayBuffer();
+  const tailBuf = await tail.arrayBuffer();
+  const sizeBuf = new ArrayBuffer(8);
+  new DataView(sizeBuf).setBigUint64(0, BigInt(file.size));
+  const concat = new Uint8Array(headBuf.byteLength + 8 + tailBuf.byteLength);
+  concat.set(new Uint8Array(headBuf), 0);
+  concat.set(new Uint8Array(sizeBuf), headBuf.byteLength);
+  concat.set(new Uint8Array(tailBuf), headBuf.byteLength + 8);
+  const digest = await crypto.subtle.digest("SHA-256", concat);
+  const hashArray = Array.from(new Uint8Array(digest));
+  const hex = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  return `sha256:${hex}`;
 }
 
 // 生成封面帧（JPG）
@@ -98,6 +119,8 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   const [eta, setEta] = useState<string>("--");
 
   const [curConcurrency, setCurConcurrency] = useState<number>(concurrency);
+  const [networkStatus, setNetworkStatus] = useState<string>("--");
+  const [totalRetries, setTotalRetries] = useState<number>(0);
 
   // 自适应并发/弱网检测指标
   const metricsRef = useRef<{
@@ -119,6 +142,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   const totalBytesRef = useRef<number>(0);
   const lastTickRef = useRef<number>(0);
   const lastBytesRef = useRef<number>(0);
+  const smoothedMbpsRef = useRef<number>(0);
 
   // CRC32C Web Worker
   const crcWorkerRef = useRef<Worker | null>(null);
@@ -205,8 +229,9 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
 
     setPaused(false);
 
-    const fingerprint = getFingerprint(file);
-    const saved = localStorage.getItem(`uploader:session:${fingerprint}`);
+    const legacyKey = getLegacyFingerprint(file);
+    const resumeKey = await computeResumeKey(file);
+    const saved = localStorage.getItem(`uploader:session:${resumeKey}`) || localStorage.getItem(`uploader:session:${legacyKey}`);
 
     let key: string;
     let uploadId: string;
@@ -216,7 +241,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       try {
         const parsed = JSON.parse(saved) as { key: string; uploadId: string; chunkSize: number };
         key = parsed.key; uploadId = parsed.uploadId; chunkSize = parsed.chunkSize || partSizeBytes;
-      } catch { localStorage.removeItem(`uploader:session:${fingerprint}`); }
+      } catch { localStorage.removeItem(`uploader:session:${resumeKey}`); localStorage.removeItem(`uploader:session:${legacyKey}`); }
     }
 
     if (!saved) {
@@ -239,7 +264,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
           chunkSize = Math.max(minChunk, init.partSize || 8 * ONE_MB);
         }
       } catch { }
-      localStorage.setItem(`uploader:session:${fingerprint}`, JSON.stringify({ key, uploadId, chunkSize }));
+      localStorage.setItem(`uploader:session:${resumeKey}`, JSON.stringify({ key, uploadId, chunkSize }));
     }
 
     currentUploadRef.current = { key: key!, uploadId: uploadId!, chunkSize, file };
@@ -290,11 +315,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       });
     }
 
-    async function md5Base64(blob: Blob): Promise<string> {
-      const buffer = await blob.arrayBuffer();
-      // 使用 SubtleCrypto 计算 MD5 不可用，退回轻量实现或跳过；这里演示可选：返回空字符串表示不使用 MD5
-      return "";
-    }
+    // 预留 MD5 实现（当前不启用）
 
     async function uploadPart(partNumber: number) {
       const start = (partNumber - 1) * chunkSize;
@@ -316,11 +337,13 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       const { url } = await signRes.json() as { url: string };
 
       const t0 = performance.now();
+      let attempts = 0;
       await retry(async () => {
-        // 重要：不要在客户端设置 x-amz- 开头的校验头，否则与预签名的 SignedHeaders 不匹配会导致 403
+        attempts += 1;
         const res = await fetch(url, { method: "PUT", body: blob, signal: controller.signal });
         if (!res.ok) throw new Error(`上传分片失败 ${partNumber}: ${res.status}`);
       });
+      if (attempts > 1) setTotalRetries(prev => prev + (attempts - 1));
       const rtt = performance.now() - t0;
       // 记录 RTT
       const m = metricsRef.current;
@@ -336,9 +359,13 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       if (dt >= 0.5) {
         const dBytes = uploadedBytesRef.current - lastBytesRef.current;
         const mbps = dBytes / dt / (1024 * 1024);
-        setSpeed(`${mbps.toFixed(2)} MB/s`);
+        // EWMA 平滑
+        const alpha = 0.3;
+        smoothedMbpsRef.current = smoothedMbpsRef.current > 0 ? (alpha * mbps + (1 - alpha) * smoothedMbpsRef.current) : mbps;
+        setSpeed(`${smoothedMbpsRef.current.toFixed(2)} MB/s`);
         const remaining = totalBytesRef.current - uploadedBytesRef.current;
-        const secLeft = Math.max(0, remaining / (dBytes / dt || 1));
+        const bytesPerSec = smoothedMbpsRef.current * 1024 * 1024;
+        const secLeft = Math.max(0, remaining / (bytesPerSec || 1));
         const m = Math.floor(secLeft / 60), s = Math.floor(secLeft % 60);
         setEta(`${m}:${String(s).padStart(2, '0')}`);
         lastTickRef.current = now;
@@ -391,13 +418,27 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       const fail = m.failures; const succ = m.successes || 1;
       const failRate = fail / (fail + succ);
       let next = curConcurrency;
-      // 调整规则：失败或 RTT>1200ms → 降 1；RTT<400ms 且无失败 → 升 1
-      if (failRate > 0.05 || avg > 1200) next = Math.max(1, curConcurrency - 1);
-      else if (avg > 0 && avg < 400 && fail === 0) next = Math.min(10, curConcurrency + 1);
+      // 调整规则：失败或 RTT>1200ms → 降 1；RTT<400ms 且无失败 → 升 1（抖动保护：至少 3s 间隔）
+      const nowTs = Date.now();
+      if (m.lastAdjustAt && nowTs - m.lastAdjustAt < 3000) {
+        // skip adjust due to guard interval
+      } else {
+        if (failRate > 0.05 || avg > 1200) next = Math.max(1, curConcurrency - 1);
+        else if (avg > 0 && avg < 400 && fail === 0) next = Math.min(10, curConcurrency + 1);
+      }
       if (next !== curConcurrency) setCurConcurrency(next);
       // 滚动窗口清零失败计数，RTT 留作趋势
       m.failures = 0;
       m.successes = 0;
+      m.lastAdjustAt = nowTs;
+      // 网络状态标签
+      let status = "--";
+      if (avg > 0) {
+        if (avg < 300 && failRate < 0.02) status = "良好";
+        else if (avg < 800 && failRate < 0.05) status = "一般";
+        else status = "较差";
+      }
+      setNetworkStatus(status);
     }, 2000);
   }
 
@@ -416,7 +457,11 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     if (!completeRes.ok) throw new Error(await completeRes.text());
 
     const file = info.file!;
-    localStorage.removeItem(`uploader:session:${getFingerprint(file)}`);
+    try {
+      const resumeKey = await computeResumeKey(file);
+      localStorage.removeItem(`uploader:session:${resumeKey}`);
+    } catch { }
+    localStorage.removeItem(`uploader:session:${getLegacyFingerprint(file)}`);
 
     try {
       setStatus("生成封面...");
@@ -482,7 +527,13 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     const info = currentUploadRef.current;
     if (info) {
       try { await fetch("/api/s3/multipart/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }); } catch { }
-      if (info.file) localStorage.removeItem(`uploader:session:${getFingerprint(info.file)}`);
+      if (info.file) {
+        try {
+          const resumeKey = await computeResumeKey(info.file);
+          localStorage.removeItem(`uploader:session:${resumeKey}`);
+        } catch { }
+        localStorage.removeItem(`uploader:session:${getLegacyFingerprint(info.file)}`);
+      }
     }
     currentUploadRef.current = null;
     controllerRef.current = null;
@@ -491,49 +542,49 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   }, [activeIdx]);
 
   return (
-    <div style={{ border: "1px dashed #cbd5e1", padding: 16, borderRadius: 12, background: "#fafafa" }} onDrop={onDrop} onDragOver={onDragOver}>
-      <label htmlFor="enterprise-video-input" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}>选择视频</label>
-      <input id="enterprise-video-input" ref={inputRef} type="file" multiple accept={accept} style={{ display: "none" }} onChange={onInput} title="选择视频文件" />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <div className="rounded-xl border border-slate-300 bg-slate-50 p-4" onDrop={onDrop} onDragOver={onDragOver}>
+      <label htmlFor="enterprise-video-input" className="sr-only">选择视频</label>
+      <input id="enterprise-video-input" ref={inputRef} type="file" multiple accept={accept} className="hidden" onChange={onInput} title="选择视频文件" />
+      <div className="flex items-center justify-between">
         <div>
-          <div style={{ fontWeight: 600 }}>企业级视频上传</div>
-          <div style={{ fontSize: 12, color: "#6b7280" }}>支持多分片/并发/断点续传/拖拽/取消/多文件队列</div>
+          <div className="font-semibold">企业级视频上传</div>
+          <div className="text-xs text-slate-500">支持多分片/并发/断点续传/拖拽/取消/多文件队列</div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: '#6b7280' }}>并发</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">并发</span>
           <input type="range" aria-label="并发数" title="并发数" min={1} max={10} value={curConcurrency} onChange={(e) => setCurConcurrency(Number(e.target.value))} />
-          <span style={{ width: 16, textAlign: 'right', fontSize: 12 }}>{curConcurrency}</span>
-          {!uploading && <button onClick={() => inputRef.current?.click()} style={{ background: "#111827", color: "white", padding: "8px 12px", borderRadius: 8 }}>选择文件</button>}
-          {uploading && !paused && <button onClick={onPause} style={{ background: "#f3f4f6", color: "#111827", padding: "8px 12px", borderRadius: 8 }}>暂停</button>}
-          {uploading && paused && <button onClick={onResume} style={{ background: "#10b981", color: "white", padding: "8px 12px", borderRadius: 8 }}>继续</button>}
-          {uploading && <button onClick={onCancel} style={{ background: "#fee2e2", color: "#991b1b", padding: "8px 12px", borderRadius: 8 }}>取消</button>}
+          <span className="w-4 text-right text-xs">{curConcurrency}</span>
+          {!uploading && <button onClick={() => inputRef.current?.click()} className="rounded-lg bg-slate-900 px-3 py-2 text-white">选择文件</button>}
+          {uploading && !paused && <button onClick={onPause} className="rounded-lg bg-slate-100 px-3 py-2 text-slate-900">暂停</button>}
+          {uploading && paused && <button onClick={onResume} className="rounded-lg bg-emerald-500 px-3 py-2 text-white">继续</button>}
+          {uploading && <button onClick={onCancel} className="rounded-lg bg-rose-100 px-3 py-2 text-rose-800">取消</button>}
         </div>
       </div>
 
-      <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: "white", border: "1px solid #e5e7eb" }}>
-        <div style={{ height: 10, background: "#e5e7eb", borderRadius: 6 }}>
-          <div style={{ width: `${progress}%`, height: 10, background: "#22c55e", borderRadius: 6, transition: "width .2s ease" }} />
+      <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+        <div className="h-2 rounded-md bg-slate-200">
+          <div className="h-2 rounded-md bg-emerald-500 transition-[width] duration-200 ease-linear" style={{ width: `${progress}%` }} />
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 12, color: "#6b7280" }}>
-          <span>进度：{progress}%（{speed}，剩余 {eta}）</span>
+        <div className="mt-1.5 flex justify-between text-xs text-slate-500">
+          <span>进度：{progress}%（{speed}，剩余 {eta}） · 网络：{networkStatus} · 重试：{totalRetries}</span>
           <span>{status}</span>
         </div>
-        {error && <div style={{ marginTop: 8, color: "#b91c1c" }}>{error}</div>}
+        {error && <div className="mt-2 text-rose-700">{error}</div>}
       </div>
 
       {queue.length > 0 && (
-        <div style={{ marginTop: 12, border: "1px solid #e5e7eb", borderRadius: 8 }}>
-          <div style={{ padding: 8, fontWeight: 600, background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>上传队列</div>
-          <ul style={{ listStyle: "none", margin: 0, padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="mt-3 rounded-lg border border-slate-200">
+          <div className="border-b border-slate-200 bg-slate-50 p-2 font-semibold">上传队列</div>
+          <ul className="flex list-none flex-col gap-2 p-2">
             {queue.map((it, i) => (
-              <li key={`${it.name}-${i}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  <span style={{ fontSize: 14 }}>{it.name}</span>
-                  <span style={{ fontSize: 12, color: '#6b7280' }}>{it.status}{it.message ? ` · ${it.message}` : ''}</span>
+              <li key={`${it.name}-${i}`} className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm">{it.name}</span>
+                  <span className="text-xs text-slate-500">{it.status}{it.message ? ` · ${it.message}` : ''}</span>
                 </div>
-                <div style={{ minWidth: 160 }}>
-                  <div style={{ height: 6, background: "#e5e7eb", borderRadius: 4 }}>
-                    <div style={{ width: `${it.progress}%`, height: 6, background: i === activeIdx ? "#22c55e" : "#9ca3af", borderRadius: 4 }} />
+                <div className="min-w-40">
+                  <div className="h-1.5 rounded bg-slate-200">
+                    <div className={`h-1.5 rounded ${i === activeIdx ? 'bg-emerald-500' : 'bg-slate-400'}`} style={{ width: `${it.progress}%` }} />
                   </div>
                 </div>
               </li>
