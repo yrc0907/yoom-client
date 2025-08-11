@@ -1,5 +1,6 @@
 /* eslint-disable */
 import { MediaConvertClient, CreateJobCommand, DescribeEndpointsCommand } from "@aws-sdk/client-mediaconvert";
+import { buildHlsJobSettings } from "../jobTemplate";
 
 export const runtime = "nodejs";
 
@@ -45,145 +46,13 @@ export async function POST(request: Request) {
     const endpoint = await getOrDiscoverEndpoint();
     const mc = new MediaConvertClient({ region: AWS_REGION, endpoint });
 
-    // 简化版 HLS 多码率 + 图像预览（Thumbnail TrickPlay）设置
-    const jobSettings = {
+    // 使用固化模板（多码率 HLS + IBTP；低码率优先）
+    const hlsTemplate = buildHlsJobSettings({ destinationS3: hlsDest });
+    const jobSettings: any = {
       TimecodeConfig: { Source: "ZEROBASED" },
-      Inputs: [
-        {
-          FileInput: inputUri,
-        },
-      ],
-      OutputGroups: [
-        {
-          Name: "HLS",
-          OutputGroupSettings: {
-            Type: "HLS_GROUP_SETTINGS",
-            HlsGroupSettings: {
-              Destination: hlsDest,
-              SegmentLength: 4,
-              MinSegmentLength: 0,
-              ManifestCompression: "NONE",
-              ManifestDurationFormat: "INTEGER",
-              ClientCache: "ENABLED",
-              IndexNSegments: 5,
-              ProgramDateTime: "EXCLUDE",
-              TimedMetadataId3Frame: "NONE",
-              TimedMetadataId3Period: 0,
-              CodecSpecification: "RFC_4281",
-              OutputSelection: "MANIFESTS_AND_SEGMENTS",
-              SegmentControl: "SEGMENTED_FILES",
-              ImageBasedTrickPlay: "THUMBNAIL",
-              ImageBasedTrickPlaySettings: {
-                IntervalCadence: "FOLLOW_CUSTOM",
-                ThumbnailInterval: 2,
-                ThumbnailWidth: 240, // even
-                ThumbnailHeight: 144, // even (multiple of 2)
-                TileWidth: 5,
-                TileHeight: 5,
-              },
-            },
-          },
-          Outputs: [
-            // 360p（优先可播）
-            {
-              NameModifier: "_360p",
-              VideoDescription: {
-                Width: 640,
-                Height: 360,
-                CodecSettings: {
-                  Codec: "H_264",
-                  H264Settings: {
-                    RateControlMode: "QVBR",
-                    QvbrQuality: 7,
-                    MaxBitrate: 1_000_000,
-                    CodecProfile: "MAIN",
-                    CodecLevel: "AUTO",
-                    GopSize: 48,
-                    GopSizeUnits: "FRAMES",
-                    GopClosedCadence: 1,
-                    NumberBFramesBetweenReferenceFrames: 3,
-                    SceneChangeDetect: "TRANSITION_DETECTION",
-                  },
-                },
-              },
-              AudioDescriptions: [
-                {
-                  CodecSettings: {
-                    Codec: "AAC",
-                    AacSettings: { Bitrate: 128000, CodingMode: "CODING_MODE_2_0", SampleRate: 48000 },
-                  },
-                },
-              ],
-              ContainerSettings: { Container: "M3U8" },
-            },
-            // 480p
-            {
-              NameModifier: "_480p",
-              VideoDescription: {
-                Width: 854,
-                Height: 480,
-                CodecSettings: {
-                  Codec: "H_264",
-                  H264Settings: {
-                    RateControlMode: "QVBR",
-                    QvbrQuality: 7,
-                    MaxBitrate: 2_000_000,
-                    CodecProfile: "MAIN",
-                    CodecLevel: "AUTO",
-                    GopSize: 48,
-                    GopSizeUnits: "FRAMES",
-                    GopClosedCadence: 1,
-                    NumberBFramesBetweenReferenceFrames: 3,
-                    SceneChangeDetect: "TRANSITION_DETECTION",
-                  },
-                },
-              },
-              AudioDescriptions: [
-                {
-                  CodecSettings: {
-                    Codec: "AAC",
-                    AacSettings: { Bitrate: 128000, CodingMode: "CODING_MODE_2_0", SampleRate: 48000 },
-                  },
-                },
-              ],
-              ContainerSettings: { Container: "M3U8" },
-            },
-            // 720p
-            {
-              NameModifier: "_720p",
-              VideoDescription: {
-                Width: 1280,
-                Height: 720,
-                CodecSettings: {
-                  Codec: "H_264",
-                  H264Settings: {
-                    RateControlMode: "QVBR",
-                    QvbrQuality: 7,
-                    MaxBitrate: 4_500_000,
-                    CodecProfile: "MAIN",
-                    CodecLevel: "AUTO",
-                    GopSize: 48,
-                    GopSizeUnits: "FRAMES",
-                    GopClosedCadence: 1,
-                    NumberBFramesBetweenReferenceFrames: 3,
-                    SceneChangeDetect: "TRANSITION_DETECTION",
-                  },
-                },
-              },
-              AudioDescriptions: [
-                {
-                  CodecSettings: {
-                    Codec: "AAC",
-                    AacSettings: { Bitrate: 128000, CodingMode: "CODING_MODE_2_0", SampleRate: 48000 },
-                  },
-                },
-              ],
-              ContainerSettings: { Container: "M3U8" },
-            },
-          ],
-        },
-      ],
-    } as any;
+      Inputs: [{ FileInput: inputUri }],
+      OutputGroups: hlsTemplate.OutputGroups,
+    };
 
     const params: any = {
       Role: MEDIACONVERT_ROLE_ARN,
