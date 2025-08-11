@@ -32,17 +32,25 @@ export async function POST(request: Request) {
     const key: string | undefined = body.key;
     const uploadId: string | undefined = body.uploadId;
     const partNumber: number | undefined = body.partNumber;
+    const checksumCRC32C: string | undefined = body.checksumCRC32C; // Base64-encoded crc32c
+    const contentMD5: string | undefined = body.contentMD5; // Base64-encoded MD5 (optional)
 
     if (!key || !uploadId || !partNumber) {
       return new Response(JSON.stringify({ error: "key, uploadId, partNumber 必填" }), { status: 400 });
     }
 
-    // 关键：不要在签名时传 Body，否则 SDK 会把该 Body 的校验和写入签名，
-    // 实际上传不同内容会触发 403 Forbidden。
-    const cmd = new UploadPartCommand({ Bucket: S3_BUCKET_NAME, Key: key, UploadId: uploadId, PartNumber: partNumber });
+    // 为了让 S3 进行端到端校验，可选传入校验头（需要与客户端 PUT 时一致）
+    const cmd = new UploadPartCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: key,
+      UploadId: uploadId,
+      PartNumber: partNumber,
+      ChecksumCRC32C: checksumCRC32C,
+      ContentMD5: contentMD5,
+    });
     const url = await getSignedUrl(s3, cmd, { expiresIn: 900 });
 
-    return Response.json({ url });
+    return Response.json({ url, requires: { checksumCRC32C: !!checksumCRC32C, contentMD5: !!contentMD5 } });
   } catch (error: unknown) {
     console.error("[multipart/sign] error", error);
     const msg = error instanceof Error ? error.message : "sign failed";

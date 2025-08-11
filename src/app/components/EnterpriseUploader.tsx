@@ -88,6 +88,15 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
 
   const [curConcurrency, setCurConcurrency] = useState<number>(concurrency);
 
+  // 自适应并发/弱网检测指标
+  const metricsRef = useRef<{
+    rttsMs: number[];
+    successes: number;
+    failures: number;
+    lastAdjustAt: number;
+    adjustTimer: number | null;
+  }>({ rttsMs: [], successes: 0, failures: 0, lastAdjustAt: 0, adjustTimer: null });
+
   type QueueItem = { file: File; name: string; size: number; status: "pending" | "uploading" | "paused" | "done" | "error"; progress: number; key?: string; message?: string };
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
@@ -170,6 +179,17 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       if (!initRes.ok) throw new Error(await initRes.text());
       const init = await initRes.json() as { key: string; uploadId: string; partSize: number };
       key = init.key; uploadId = init.uploadId; chunkSize = init.partSize || partSizeBytes;
+      // 弱网优先更小分片，强网可保持/略增（S3 最小 5MB）
+      try {
+        const et = (navigator as any)?.connection?.effectiveType as string | undefined;
+        const ONE_MB = 1024 * 1024;
+        const minChunk = 5 * ONE_MB;
+        if (et && ["2g", "slow-2g", "3g"].includes(et)) {
+          chunkSize = Math.max(minChunk, 5 * ONE_MB);
+        } else if (et && ["4g", "wifi"].includes(et)) {
+          chunkSize = Math.max(minChunk, init.partSize || 8 * ONE_MB);
+        }
+      } catch { }
       localStorage.setItem(`uploader:session:${fingerprint}`, JSON.stringify({ key, uploadId, chunkSize }));
     }
 
@@ -200,23 +220,66 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     lastTickRef.current = performance.now();
     lastBytesRef.current = uploadedBytesRef.current;
 
+    // 计算 crc32c（RFC 4960 多项式，输出 base64）
+    async function crc32cBase64(blob: Blob): Promise<string> {
+      const buffer = await blob.arrayBuffer();
+      // 轻量实现：使用 WebAssembly/内置 API 不可用时，退回 JS 表；为避免体积，这里用简易版。
+      // 生成查表
+      const table = new Uint32Array(256);
+      const poly = 0x82F63B78; // Castagnoli
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (poly ^ (c >>> 1)) : (c >>> 1);
+        table[i] = c >>> 0;
+      }
+      let crc = 0xFFFFFFFF;
+      const view = new Uint8Array(buffer);
+      for (let i = 0; i < view.length; i++) crc = table[(crc ^ view[i]) & 0xFF] ^ (crc >>> 8);
+      crc = (crc ^ 0xFFFFFFFF) >>> 0;
+      // 转大端字节序再 base64
+      const b = new Uint8Array(4);
+      b[0] = (crc >>> 24) & 0xFF; b[1] = (crc >>> 16) & 0xFF; b[2] = (crc >>> 8) & 0xFF; b[3] = crc & 0xFF;
+      return btoa(String.fromCharCode(...b));
+    }
+
+    async function md5Base64(blob: Blob): Promise<string> {
+      const buffer = await blob.arrayBuffer();
+      // 使用 SubtleCrypto 计算 MD5 不可用，退回轻量实现或跳过；这里演示可选：返回空字符串表示不使用 MD5
+      return "";
+    }
+
     async function uploadPart(partNumber: number) {
       const start = (partNumber - 1) * chunkSize;
       const end = Math.min(file.size, partNumber * chunkSize);
       const blob = file.slice(start, end);
 
+      // 预计算校验
+      let checksumCRC32C = "";
+      try { checksumCRC32C = await crc32cBase64(blob); } catch { }
+      const contentMD5 = ""; // 可按需开启 md5Base64(blob)
+
       const signRes = await fetch("/api/s3/multipart/sign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, uploadId, partNumber }),
+        body: JSON.stringify({ key, uploadId, partNumber, checksumCRC32C, contentMD5: contentMD5 || undefined }),
       });
       if (!signRes.ok) throw new Error(await signRes.text());
       const { url } = await signRes.json() as { url: string };
 
+      const t0 = performance.now();
       await retry(async () => {
-        const res = await fetch(url, { method: "PUT", body: blob, signal: controller.signal });
+        const headers: Record<string, string> = {};
+        if (checksumCRC32C) headers["x-amz-checksum-crc32c"] = checksumCRC32C;
+        if (contentMD5) headers["Content-MD5"] = contentMD5;
+        const res = await fetch(url, { method: "PUT", body: blob, headers, signal: controller.signal });
         if (!res.ok) throw new Error(`上传分片失败 ${partNumber}: ${res.status}`);
       });
+      const rtt = performance.now() - t0;
+      // 记录 RTT
+      const m = metricsRef.current;
+      m.rttsMs.push(rtt);
+      if (m.rttsMs.length > 30) m.rttsMs.shift();
+      m.successes += 1;
 
       pendingPartsRef.current.delete(partNumber);
       uploadedBytesRef.current += blob.size;
@@ -257,6 +320,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
           } else {
             pendingPartsRef.current.add(partNumber);
             setError(err instanceof Error ? err.message : String(err));
+            metricsRef.current.failures += 1;
           }
         });
         pendingPartsRef.current.delete(partNumber);
@@ -267,6 +331,27 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     };
 
     trySpawn();
+
+    // 自适应并发调度：每 2s 评估 RTT/失败率，动态增减并发
+    if (metricsRef.current.adjustTimer) {
+      window.clearInterval(metricsRef.current.adjustTimer);
+    }
+    metricsRef.current.adjustTimer = window.setInterval(() => {
+      const m = metricsRef.current;
+      if (paused || controller.signal.aborted) return;
+      const samples = m.rttsMs.slice(-10);
+      const avg = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : 0;
+      const fail = m.failures; const succ = m.successes || 1;
+      const failRate = fail / (fail + succ);
+      let next = curConcurrency;
+      // 调整规则：失败或 RTT>1200ms → 降 1；RTT<400ms 且无失败 → 升 1
+      if (failRate > 0.05 || avg > 1200) next = Math.max(1, curConcurrency - 1);
+      else if (avg > 0 && avg < 400 && fail === 0) next = Math.min(10, curConcurrency + 1);
+      if (next !== curConcurrency) setCurConcurrency(next);
+      // 滚动窗口清零失败计数，RTT 留作趋势
+      m.failures = 0;
+      m.successes = 0;
+    }, 2000) as any;
   }
 
   async function completeUpload() {
