@@ -7,32 +7,45 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "setupmediaconvert": "echo Set MEDIACONVERT_ENDPOINT, MEDIACONVERT_ROLE_ARN, optional MEDIACONVERT_QUEUE_ARN then restart"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.864.0",
+    "@aws-sdk/client-dynamodb": "^3.864.0",
     "@aws-sdk/client-mediaconvert": "^3.864.0",
     "@aws-sdk/client-s3": "^3.864.0",
-    "@aws-sdk/client-dynamodb": "^3.864.0",
     "@aws-sdk/lib-dynamodb": "^3.864.0",
     "@aws-sdk/s3-presigned-post": "^3.864.0",
     "@aws-sdk/s3-request-presigner": "^3.864.0",
+    "@sentry/nextjs": "^8",
     "@smithy/node-http-handler": "^4.1.1",
+    "fast-crc32c": "^2.0.0",
     "hls.js": "^1.5.15",
     "https-proxy-agent": "^7.0.6",
     "next": "15.4.6",
     "plyr": "^3.7.8",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "sharp": "^0.33.5",
+    "web-vitals": "^4"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@playwright/test": "^1.46.0",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6",
+    "@testing-library/react": "^16",
+    "@testing-library/user-event": "^14",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.4.6",
+    "jsdom": "^25",
+    "msw": "^2",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^2.0.0"
   }
 }

@@ -1,0 +1,9 @@
+[
+  {
+    "Create": {
+      "IndexName": "headTail-index",
+      "KeySchema": [{ "AttributeName": "headTail", "KeyType": "HASH" }],
+      "Projection": { "ProjectionType": "ALL" }
+    }
+  }
+]

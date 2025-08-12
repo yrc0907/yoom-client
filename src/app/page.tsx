@@ -1,5 +1,6 @@
 "use client";
-import EnterpriseUploader from "./components/EnterpriseUploader";
+import dynamic from "next/dynamic";
+const EnterpriseUploader = dynamic(() => import("./components/EnterpriseUploader"), { ssr: false, loading: () => null });
 import VideoGallery from "./components/VideoGallery";
 import { ToastProvider } from "./components/ToastCenter";
 import { useEffect } from "react";
@@ -15,6 +16,7 @@ function SWRegister() {
 }
 
 export default function Home() {
+  // removed web-vitals reporting per request
   return (
     <ToastProvider>
       <SWRegister />

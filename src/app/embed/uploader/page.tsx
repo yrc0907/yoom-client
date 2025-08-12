@@ -1,7 +1,10 @@
 "use client";
 
-import EnterpriseUploader from "@/app/components/EnterpriseUploader";
-import { useCallback, useEffect, useMemo } from "react";
+import dynamic from "next/dynamic";
+import { useCallback, useEffect } from "react";
+
+// 动态按需加载上传组件，避免在未访问上传页时加载其依赖（含 wasm）
+const EnterpriseUploader = dynamic(() => import("@/app/components/EnterpriseUploader"), { ssr: false, loading: () => null });
 
 export default function EmbedUploaderPage() {
   const onCompleted = useCallback((p: { key: string }) => {

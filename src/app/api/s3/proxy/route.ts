@@ -45,7 +45,13 @@ export async function GET(request: Request) {
       if (res.ETag) headers.set("ETag", res.ETag);
       headers.set("Accept-Ranges", "bytes");
       if (res.ContentRange) headers.set("Content-Range", res.ContentRange);
-      headers.set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+      // VTT/缩略图等可强缓存较长时间，通过版本化路径失效（如包含哈希或日期目录）
+      const keyLower = key.toLowerCase();
+      if (keyLower.endsWith('.vtt') || keyLower.includes('/previews-vtt/') || keyLower.endsWith('.jpg') || keyLower.endsWith('.png')) {
+        headers.set("Cache-Control", "public, max-age=31536000, immutable");
+      } else {
+        headers.set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+      }
       headers.set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Range, ETag, Content-Length");
 
       const status = res.ContentRange ? 206 : 200;
