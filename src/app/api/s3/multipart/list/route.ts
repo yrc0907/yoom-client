@@ -36,6 +36,7 @@ export async function POST(request: Request) {
     }
 
     const parts: { ETag: string; PartNumber: number; Size?: number }[] = [];
+    let noSuchUpload = false;
     let partNumberMarker: string | undefined = undefined;
 
     // 处理分页
@@ -48,6 +49,7 @@ export async function POST(request: Request) {
       } catch (err: unknown) {
         const e = err as { name?: string; Code?: string };
         if (e?.name === "NoSuchUpload" || e?.Code === "NoSuchUpload") {
+          noSuchUpload = true;
           break;
         }
         throw err;
@@ -59,7 +61,7 @@ export async function POST(request: Request) {
       partNumberMarker = res.NextPartNumberMarker || undefined;
     }
 
-    return Response.json({ parts });
+    return Response.json({ parts, noSuchUpload });
   } catch (error: unknown) {
     console.error("[multipart/list] error", error);
     const msg = error instanceof Error ? error.message : "list failed";

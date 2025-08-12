@@ -1,21 +1,23 @@
 /// <reference lib="webworker" />
-
-// Precompute CRC32C (Castagnoli) table once in the worker context
-const CRC32C_TABLE = new Uint32Array(256);
+/*eslint-disable*/
+let CRC32C_TABLE: Uint32Array | null = null;
 const CRC32C_POLY = 0x82F63B78;
-for (let i = 0; i < 256; i++) {
-  let c = i;
-  for (let k = 0; k < 8; k++) {
-    c = (c & 1) ? (CRC32C_POLY ^ (c >>> 1)) : (c >>> 1);
+function ensureTable() {
+  if (CRC32C_TABLE) return;
+  CRC32C_TABLE = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (CRC32C_POLY ^ (c >>> 1)) : (c >>> 1);
+    CRC32C_TABLE[i] = c >>> 0;
   }
-  CRC32C_TABLE[i] = c >>> 0;
 }
 
 function crc32cToBase64(buffer: ArrayBuffer): string {
+  ensureTable();
   let crc = 0xFFFFFFFF;
   const view = new Uint8Array(buffer);
   for (let i = 0; i < view.length; i++) {
-    crc = CRC32C_TABLE[(crc ^ view[i]) & 0xFF] ^ (crc >>> 8);
+    crc = (CRC32C_TABLE as Uint32Array)[(crc ^ view[i]) & 0xFF] ^ (crc >>> 8);
   }
   crc = (crc ^ 0xFFFFFFFF) >>> 0;
   // big-endian bytes then base64
@@ -29,6 +31,8 @@ function crc32cToBase64(buffer: ArrayBuffer): string {
   return btoa(s);
 }
 
+// Disable WASM fast path to avoid environments where fast-crc32c backend is unavailable
+const ENABLE_WASM_CRC32C = false;
 self.onmessage = (ev: MessageEvent) => {
   const { id, buffer } = ev.data as { id: number; buffer: ArrayBuffer };
   const base64 = crc32cToBase64(buffer);

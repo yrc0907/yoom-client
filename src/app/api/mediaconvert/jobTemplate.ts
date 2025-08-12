@@ -254,10 +254,7 @@ export function buildCmafHlsJobSettings(params: {
             WriteDashManifest: "DISABLED",
             WriteHlsManifest: "ENABLED",
             CodecSpecification: "RFC_4281",
-            // 低延迟 HLS 参数
             HlsManifests: [{ ManifestNameModifier: "", ManifestName: "index" }],
-            // CMAF 要求每个视频输出配一个音频（或使用独立音频输出），这里简化为独立 AAC 音频轨
-            DestinationSettings: {},
           },
         },
         Outputs: [

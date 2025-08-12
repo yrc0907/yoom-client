@@ -42,7 +42,15 @@ export async function POST(request: Request) {
       UploadId: uploadId,
       MultipartUpload: { Parts: parts.map(p => ({ ETag: p.ETag, PartNumber: p.PartNumber })) },
     });
-    await s3.send(cmd);
+    try {
+      await s3.send(cmd);
+    } catch (err: unknown) {
+      const e = err as { name?: string; Code?: string };
+      if (e?.name === "NoSuchUpload" || e?.Code === "NoSuchUpload") {
+        return new Response(JSON.stringify({ error: "NoSuchUpload", hint: "The multipart session is missing; please restart upload." }), { status: 409 });
+      }
+      throw err;
+    }
 
     return Response.json({ ok: true, key });
   } catch (error: unknown) {
