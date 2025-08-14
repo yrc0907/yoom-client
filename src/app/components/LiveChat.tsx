@@ -69,7 +69,6 @@ export default function LiveChat({ roomId }: { roomId: string }) {
       const proto = isHttps ? 'wss' : 'ws';
       const host = typeof location !== 'undefined' ? location.hostname : 'localhost';
       const direct = `${proto}://${host}:${process.env.NEXT_PUBLIC_COMMENTS_WS_PORT || '4002'}/?roomId=${encodeURIComponent(roomId)}`;
-      // Chrome 对同源代理的 WS 升级不稳定，改为强制直连 WS 端口
       open(direct);
     }
     connect();
