@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
+import LiveChat from '@/app/components/LiveChat';
 
 type Stream = { title: string; description?: string | null; status: string; playbackId?: string | null };
 
@@ -101,12 +102,17 @@ export default function Page() {
     );
   }
   return (
-    <div style={{ padding: 24, display: 'grid', gap: 12 }}>
-      <h1 style={{ fontSize: 20, fontWeight: 600 }}>{s.title} · RTC</h1>
-      <div style={{ color: '#6b7280' }}>{s.description || ''}</div>
-      <div><b>状态：</b>{s.status}</div>
-      <div style={{ maxWidth: 960 }}>
-        <RtcPlayer url={webrtcUrl} api={httpApi} />
+    <div className="p-6">
+      <h1 className="text-2xl font-semibold mb-2">{s.title} · RTC</h1>
+      <div className="text-black/60 mb-3">{s.description || ''}</div>
+      <div className="mb-4">状态：{s.status}</div>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-4">
+        <div className="min-w-0">
+          <RtcPlayer url={webrtcUrl} api={httpApi} />
+        </div>
+        <div className="h-[560px]">
+          <LiveChat roomId={id} />
+        </div>
       </div>
     </div>
   );

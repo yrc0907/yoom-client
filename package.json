@@ -20,6 +20,8 @@
     "@aws-sdk/lib-dynamodb": "^3.864.0",
     "@aws-sdk/s3-presigned-post": "^3.864.0",
     "@aws-sdk/s3-request-presigner": "^3.864.0",
+    "@emoji-mart/data": "^1.2.1",
+    "@emoji-mart/react": "^1.1.1",
     "@sentry/nextjs": "^8",
     "@smithy/node-http-handler": "^4.1.1",
     "fast-crc32c": "^2.0.0",
