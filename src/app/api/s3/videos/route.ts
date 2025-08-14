@@ -2,6 +2,7 @@ import { S3Client, ListObjectsV2Command, _Object, GetObjectCommand, HeadObjectCo
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpsProxyAgent } from "https-proxy-agent";
+import jwt, { JwtPayload } from "jsonwebtoken";
 
 
 export const runtime = "nodejs";
@@ -58,7 +59,22 @@ export async function GET(request: Request) {
     const expiresIn = parseNumber(searchParams.get("expires"), 600, 60, 3600);
     const includeHls = searchParams.get("includeHls") === "1";
 
-    const prefix = "uploads/videos/";
+    // Multi-tenant isolation by userId
+    const auth = request.headers.get("authorization") || request.headers.get("Authorization") || "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || "dev-secret";
+    let userId: string | null = null;
+    try {
+      if (bearer) {
+        const decoded = jwt.verify(bearer, secret) as JwtPayload & { sub?: string };
+        userId = decoded?.sub ? String(decoded.sub) : null;
+      }
+    } catch { }
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    }
+
+    const prefix = `uploads/users/${userId}/videos/`;
 
     const listRes = await s3Client.send(
       new ListObjectsV2Command({

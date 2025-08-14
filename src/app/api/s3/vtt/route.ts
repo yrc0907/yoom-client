@@ -44,6 +44,7 @@ export async function GET(request: Request) {
     const base = searchParams.get("base");
     if (!base) return new Response(JSON.stringify({ error: "base 必填" }), { status: 400 });
     const baseName = base.split("/").at(-1) || base;
+    const fallbackInterval = Number(searchParams.get("interval") || "2");
 
     // 优先尝试固定位置 previews-vtt（两种命名）
     let vttKey = `previews-vtt/${baseName}-sprite.vtt`;
@@ -75,11 +76,31 @@ export async function GET(request: Request) {
       const list = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET_NAME, Prefix: prefixProbe, MaxKeys: 1000 }));
       const candidate = (list.Contents || []).map(o => o.Key || "").find(k => k.endsWith(".vtt"));
       if (!candidate) {
-        return new Response(JSON.stringify({ error: "sprite vtt not found" }), { status: 404 });
+        // 动态兜底：若存在逐帧 jpg，但没有 vtt，则按固定间隔合成一个简易 vtt
+        const framePrefix = `previews-vtt/${baseName}/`;
+        const framesList = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET_NAME, Prefix: framePrefix, MaxKeys: 1000 }));
+        const frames = (framesList.Contents || [])
+          .map(o => o.Key || "")
+          .filter(k => /\/(\d{3,4})\.(jpg|jpeg|png|webp)$/i.test(k))
+          .sort();
+        if (frames.length === 0) {
+          return new Response(JSON.stringify({ error: "sprite vtt not found" }), { status: 404 });
+        }
+        // 合成 VTT
+        let vtt = "WEBVTT\n\n";
+        let t = 0;
+        const step = Math.max(1, Math.min(10, fallbackInterval));
+        for (const f of frames) {
+          const next = t + step;
+          vtt += `${fmt(t)} --> ${fmt(next)}\n/api/s3/proxy?key=${encodeURIComponent(f)}\n\n`;
+          t = next;
+        }
+        vttText = vtt;
+      } else {
+        vttKey = candidate;
+        const res = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: vttKey }));
+        vttText = await streamToString(res.Body as any);
       }
-      vttKey = candidate;
-      const res = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: vttKey }));
-      vttText = await streamToString(res.Body as any);
     }
 
     const vttDir = vttKey.split("/").slice(0, -1).join("/");
@@ -101,6 +122,14 @@ export async function GET(request: Request) {
     const msg = err instanceof Error ? err.message : "vtt failed";
     return new Response(JSON.stringify({ error: msg }), { status: 500 });
   }
+}
+
+function fmt(sec: number): string {
+  const s = Math.floor(sec);
+  const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}.000`;
 }
 
 
