@@ -1,6 +1,7 @@
 import { S3Client, CreateMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpsProxyAgent } from "https-proxy-agent";
+import jwt, { JwtPayload } from "jsonwebtoken";
 
 export const runtime = "nodejs";
 
@@ -46,9 +47,22 @@ export async function POST(request: Request) {
       return new Response(JSON.stringify({ error: "fileName 和 video 类型必填" }), { status: 400 });
     }
 
+    // auth: require userId from JWT
+    const auth = request.headers.get("authorization") || request.headers.get("Authorization") || "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || "dev-secret";
+    let userId: string | null = null;
+    try {
+      if (bearer) {
+        const decoded = jwt.verify(bearer, secret) as JwtPayload & { sub?: string };
+        userId = decoded?.sub ? String(decoded.sub) : null;
+      }
+    } catch { }
+    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+
     const datePart = new Date().toISOString().slice(0, 10);
     const ext = getFileExtension(sanitizeFileName(fileName));
-    const key = `uploads/videos/${datePart}/${crypto.randomUUID()}${ext}`;
+    const key = `uploads/users/${userId}/videos/${datePart}/${crypto.randomUUID()}${ext}`;
 
     const cmd = new CreateMultipartUploadCommand({ Bucket: S3_BUCKET_NAME, Key: key, ContentType: fileType });
     const res = await s3.send(cmd);

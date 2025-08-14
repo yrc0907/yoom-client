@@ -146,9 +146,10 @@ async function generatePosterFromFile(file: File, atSeconds = 1.5): Promise<Blob
 
 // 通过预签名直传封面
 async function uploadPosterBlob(baseName: string, blob: Blob): Promise<string> {
+  const jwt = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
   const presign = await fetch("/api/s3/presign-image", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
     body: JSON.stringify({ fileName: `${baseName}.jpg`, fileType: "image/jpeg", fileSize: blob.size, baseName }),
   });
   if (!presign.ok) throw new Error(await presign.text());
@@ -352,7 +353,8 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
   // pick 函数无需导出，使用处已内联调用 inputRef
 
   async function listUploadedParts(key: string, uploadId: string): Promise<{ partNumbers: Set<number>; uploadedBytes: number }> {
-    const res = await fetchWithTimeout("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, uploadId }) }, 6000);
+    const jwt = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+    const res = await fetchWithTimeout("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) }, body: JSON.stringify({ key, uploadId }) }, 6000);
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json() as { parts: { PartNumber: number; ETag: string; Size?: number }[] };
     const setNums = new Set<number>();
@@ -432,9 +434,10 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
         headHash = ht.headHash; tailHash = ht.tailHash;
       } catch { }
       setStatus("准备上传: 初始化会话...");
+      const jwt = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
       const initRes = await fetchWithTimeout("/api/s3/multipart/initiate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
         body: JSON.stringify({ fileName: file.name, fileType: file.type, fileSize: file.size, headHash, tailHash }),
       }, 6000);
       if (!initRes.ok) throw new Error(await initRes.text());
@@ -490,7 +493,28 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
           localStorage.removeItem(`uploader:session:${resumeKey}`);
           localStorage.removeItem(`uploader:session:${legacyKey}`);
           setStatus("会话失效，重新初始化...");
-          // 重新走新会话路径
+
+          // 重新初始化新的分片会话
+          try {
+            let headHash: string | undefined;
+            let tailHash: string | undefined;
+            try {
+              const ht = await computeHeadTailHashes(file);
+              headHash = ht.headHash; tailHash = ht.tailHash;
+            } catch { }
+            const jwtReinit = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+            const initRes2 = await fetchWithTimeout("/api/s3/multipart/initiate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(jwtReinit ? { Authorization: `Bearer ${jwtReinit}` } : {}) },
+              body: JSON.stringify({ fileName: file.name, fileType: file.type, fileSize: file.size, headHash, tailHash }),
+            }, 6000);
+            if (!initRes2.ok) throw new Error(await initRes2.text());
+            const init2 = await initRes2.json() as { key: string; uploadId: string | null; partSize: number };
+            key = init2.key; uploadId = init2.uploadId || ""; chunkSize = init2.partSize || partSizeBytes;
+            skipList = true; // 新会话，从第一分片开始
+            localStorage.setItem(`uploader:session:${resumeKey}`, JSON.stringify({ key, uploadId, chunkSize }));
+          } catch { /*保持走下方通用回退*/ }
+
           pendingPartsRef.current = new Set(Array.from({ length: totalParts }, (_, i) => i + 1));
           uploadedBytesRef.current = 0;
           setProgress(0);
@@ -602,9 +626,10 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       try { checksumCRC32C = await crc32cBase64(blob); } catch { }
       const contentMD5 = ""; // 可按需开启 md5Base64(blob)
 
+      const jwtForSign = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
       const signRes = await fetchWithTimeout("/api/s3/multipart/sign", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(jwtForSign ? { Authorization: `Bearer ${jwtForSign}` } : {}) },
         // 为避免与预签名的 SignedHeaders 不一致导致 403，这里不再通过服务器签名校验参数
         body: JSON.stringify({ key, uploadId, partNumber }),
       }, 6000);
@@ -705,13 +730,15 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
             if ((e?.status === 403 || e?.status === 401) && !controller.signal.aborted) {
               // 预签名可能过期，重签并重试一次
               try {
-                const re = await fetchWithTimeout("/api/s3/multipart/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, uploadId, partNumber }) }, 6000);
+                const jwtRe = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+                const re = await fetchWithTimeout("/api/s3/multipart/sign", { method: "POST", headers: { "Content-Type": "application/json", ...(jwtRe ? { Authorization: `Bearer ${jwtRe}` } : {}) }, body: JSON.stringify({ key, uploadId, partNumber }) }, 6000);
                 if (re.ok) { const j = await re.json() as { url: string }; url = j.url; }
               } catch { }
             } else if ((e?.status === 404) && !controller.signal.aborted) {
               // 端点差异或临时签名问题，重签一次
               try {
-                const re = await fetchWithTimeout("/api/s3/multipart/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, uploadId, partNumber }) }, 6000);
+                const jwtRe2 = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+                const re = await fetchWithTimeout("/api/s3/multipart/sign", { method: "POST", headers: { "Content-Type": "application/json", ...(jwtRe2 ? { Authorization: `Bearer ${jwtRe2}` } : {}) }, body: JSON.stringify({ key, uploadId, partNumber }) }, 6000);
                 if (re.ok) { const j = await re.json() as { url: string }; url = j.url; }
               } catch { }
             }
@@ -940,7 +967,8 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     if (!info) return;
     setStatus("合并分片...");
 
-    const res = await fetchWithTimeout("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }, 6000);
+    const jwt = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+    const res = await fetchWithTimeout("/api/s3/multipart/list", { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }, 6000);
     const data = await res.json() as { parts: { PartNumber: number; ETag: string }[], noSuchUpload?: boolean };
     if (data.noSuchUpload) {
       // 会话丢失：直接返回并提示用户重试（上层会清理本地会话并重启）
@@ -948,7 +976,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     }
     const completeRes = await fetchWithTimeout("/api/s3/multipart/complete", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
       body: JSON.stringify({ key: info.key, uploadId: info.uploadId, parts: data.parts.map(p => ({ ETag: p.ETag, PartNumber: p.PartNumber })) }),
     }, 6000);
     if (!completeRes.ok) throw new Error(await completeRes.text());
@@ -970,7 +998,7 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
       setStatus("已提交后台生成预览...");
     } catch { }
 
-    try { await fetchWithTimeout("/api/s3/videos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key }) }, 6000); } catch { }
+    try { await fetchWithTimeout("/api/s3/videos", { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) }, body: JSON.stringify({ key: info.key }) }, 6000); } catch { }
 
     setStatus("完成");
     setUploading(false);
@@ -1023,7 +1051,8 @@ export default function EnterpriseUploader({ accept = "video/*", partSizeBytes =
     setStatus("已取消");
     const info = currentUploadRef.current;
     if (info) {
-      try { await fetchWithTimeout("/api/s3/multipart/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }, 6000); } catch { }
+      const jwt = (typeof window !== 'undefined' ? localStorage.getItem('token') : null) || "";
+      try { await fetchWithTimeout("/api/s3/multipart/abort", { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) }, body: JSON.stringify({ key: info.key, uploadId: info.uploadId }) }, 6000); } catch { }
       if (info.file) {
         try {
           const resumeKey = await computeResumeKey(info.file);

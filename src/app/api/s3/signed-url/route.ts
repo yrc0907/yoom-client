@@ -2,6 +2,7 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpsProxyAgent } from "https-proxy-agent";
+import jwt, { JwtPayload } from "jsonwebtoken";
 
 export const runtime = "nodejs";
 
@@ -38,6 +39,22 @@ export async function GET(request: Request) {
     const key = searchParams.get("key");
     if (!key) return new Response(JSON.stringify({ error: "key 必填" }), { status: 400 });
     const expires = parseNumber(searchParams.get("expires"), 600, 60, 3600);
+
+    // Ensure the requester can only sign their own keys
+    const auth = request.headers.get("authorization") || request.headers.get("Authorization") || "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || "dev-secret";
+    let userId: string | null = null;
+    try {
+      if (bearer) {
+        const decoded = jwt.verify(bearer, secret) as JwtPayload & { sub?: string };
+        userId = decoded?.sub ? String(decoded.sub) : null;
+      }
+    } catch { }
+    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    if (!key.startsWith(`uploads/users/${userId}/`)) {
+      return new Response(JSON.stringify({ error: "forbidden" }), { status: 403 });
+    }
 
     const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: key }), { expiresIn: expires });
     return Response.json({ url, expires });

@@ -1,5 +1,6 @@
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { S3Client } from "@aws-sdk/client-s3";
+import jwt, { JwtPayload } from "jsonwebtoken";
 
 export const runtime = "nodejs";
 
@@ -47,11 +48,24 @@ export async function POST(request: Request) {
       );
     }
 
+    // restrict by userId
+    const auth = request.headers.get("authorization") || request.headers.get("Authorization") || "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || "dev-secret";
+    let userId: string | null = null;
+    try {
+      if (bearer) {
+        const decoded = jwt.verify(bearer, secret) as JwtPayload & { sub?: string };
+        userId = decoded?.sub ? String(decoded.sub) : null;
+      }
+    } catch { }
+    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+
     const datePart = new Date().toISOString().slice(0, 10);
     const sanitized = sanitizeFileName(fileName);
     const ext = getFileExtension(sanitized) || ".jpg";
     const base = (preferBaseName || sanitized).replace(/\.[^.]+$/, "");
-    const key = `uploads/posters/${base}${ext}`; // 固定到基名.jpg，便于前端关联
+    const key = `uploads/users/${userId}/posters/${base}${ext}`; // 用户隔离
 
     const maxBytes = 10 * 1024 * 1024; // 10MB
     if (typeof fileSize === "number" && fileSize > maxBytes) {

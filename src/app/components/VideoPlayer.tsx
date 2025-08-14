@@ -21,6 +21,7 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
   const plyrRef = useRef<any | null>(null);
   const [currentSrc, setCurrentSrc] = useState(src);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [thumbsSrc, setThumbsSrc] = useState<string | null>(null);
 
   const timeKey = storageId ? `vp:last:${storageId}` : undefined;
 
@@ -80,11 +81,13 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
     }
 
     let destroyed = false;
+    // 直接指定 vtt 源，避免异步探测导致初始化时机不一致
+    if (thumbsBase) setThumbsSrc(`/api/s3/vtt?base=${encodeURIComponent(thumbsBase)}`); else setThumbsSrc(null);
     (async () => {
       try {
         const PlyrMod = await import("plyr");
         if (destroyed) return;
-        const plyr = new PlyrMod.default(video, {
+        const plyr: any = new (PlyrMod as any).default(video, {
           controls: [
             "play-large",
             "play",
@@ -100,12 +103,10 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
           settings: ["speed"],
           speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
           i18n: { play: "播放", pause: "暂停", mute: "静音", unmute: "取消静音", fullscreen: "全屏", settings: "设置", speed: "倍速", pip: "画中画" },
-          previewThumbnails: thumbsBase ? {
-            enabled: true,
-            src: `/api/s3/vtt?base=${encodeURIComponent(thumbsBase)}`,
-          } : undefined,
+          previewThumbnails: thumbsSrc ? { enabled: true, src: thumbsSrc } : undefined,
         });
-        plyrRef.current = plyr;
+        try { if (thumbsSrc && plyr?.previewThumbnails?.load) plyr.previewThumbnails.load(thumbsSrc); } catch { }
+        plyrRef.current = plyr as any;
       } catch { }
     })();
 
@@ -117,7 +118,7 @@ export default function VideoPlayer({ src, poster, title, expiresAt, onRequestRe
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("error", onError);
     };
-  }, [currentSrc, onRequestRefreshUrl, timeKey]);
+  }, [currentSrc, onRequestRefreshUrl, timeKey, thumbsBase]);
 
   // 过期前自动续签
   useEffect(() => {

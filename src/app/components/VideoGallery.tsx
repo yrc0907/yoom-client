@@ -19,13 +19,17 @@ type VideoItem = {
   lastModified?: string;
 };
 
-type ListResponse = {
+export type ListResponse = {
   items: VideoItem[];
   nextToken: string | null;
   expires: number;
 };
 
-export default function VideoGallery() {
+type VideoGalleryProps = {
+  listLoader?: (token: string | null, limit: number) => Promise<ListResponse>;
+};
+
+export default function VideoGallery({ listLoader }: VideoGalleryProps) {
   const [items, setItems] = useState<VideoItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,18 +47,26 @@ export default function VideoGallery() {
     setLoading(true);
     setError(null);
     try {
-      const url = new URL("/api/s3/videos", window.location.origin);
-      url.searchParams.set("limit", String(limit));
-      url.searchParams.set("expires", "600");
-      url.searchParams.set("includeHls", "1");
-      if (token) url.searchParams.set("token", token);
+      if (listLoader) {
+        const data = await listLoader(token ?? null, limit);
+        setItems((prev) => (token ? [...prev, ...data.items] : data.items));
+        setNextToken(data.nextToken);
+        setExpires(data.expires ?? 600);
+      } else {
+        const url = new URL("/api/s3/videos", window.location.origin);
+        url.searchParams.set("limit", String(limit));
+        url.searchParams.set("expires", "600");
+        url.searchParams.set("includeHls", "1");
+        if (token) url.searchParams.set("token", token);
 
-      const res = await fetch(url.toString(), { cache: "no-store" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as ListResponse;
-      setItems((prev) => (token ? [...prev, ...data.items] : data.items));
-      setNextToken(data.nextToken);
-      setExpires(data.expires ?? 600);
+        const jwt = localStorage.getItem("token") || "";
+        const res = await fetch(url.toString(), { cache: "no-store", headers: jwt ? { Authorization: `Bearer ${jwt}` } : undefined });
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as ListResponse;
+        setItems((prev) => (token ? [...prev, ...data.items] : data.items));
+        setNextToken(data.nextToken);
+        setExpires(data.expires ?? 600);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "加载失败";
       setError(msg);
@@ -134,7 +146,8 @@ export default function VideoGallery() {
                     const u = new URL("/api/s3/signed-url", window.location.origin);
                     u.searchParams.set("key", it.key);
                     u.searchParams.set("expires", String(expires));
-                    const res = await fetch(u.toString());
+                    const jwt = localStorage.getItem("token") || "";
+                    const res = await fetch(u.toString(), { headers: jwt ? { Authorization: `Bearer ${jwt}` } : undefined });
                     if (!res.ok) throw new Error(await res.text());
                     const data = (await res.json()) as { url: string };
                     return data.url;
@@ -151,7 +164,10 @@ export default function VideoGallery() {
                   previewStrategy={previewStrategy}
                   vttMode={vttMode}
                   style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
-                  onClick={() => setOpenedKey(it.key)}
+                  onClick={() => {
+                    const u = new URL(`/video/${encodeURIComponent(it.key)}`, window.location.origin);
+                    window.location.assign(u.toString());
+                  }}
                 />
               )}
             </div>
