@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import VideoPlayer from "@/app/components/VideoPlayer";
 import PublishButton from "@/app/components/PublishButton";
 
@@ -13,6 +13,7 @@ export default function VideoDetailClient({ videoKey }: { videoKey: string }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [thumbsBase, setThumbsBase] = useState<string | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -28,7 +29,7 @@ export default function VideoDetailClient({ videoKey }: { videoKey: string }) {
           setVideoUrl(data.url);
           setThumbsBase(data.thumbsBase || null);
         }
-        const cr = await fetch(`/api/comments?videoId=${encodeURIComponent(videoKey)}`, { cache: "no-store" });
+        const cr = await fetch(`/api/comments?videoId=${encodeURIComponent(videoKey)}&limit=200`, { cache: "no-store" });
         if (cr.ok) {
           const cj = await cr.json();
           setComments(cj.items || []);
@@ -39,6 +40,36 @@ export default function VideoDetailClient({ videoKey }: { videoKey: string }) {
     })();
   }, [videoKey]);
 
+  // realtime
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    const isHttps = typeof location !== 'undefined' && location.protocol === 'https:';
+    const proto = isHttps ? 'wss' : 'ws';
+    const host = typeof location !== 'undefined' ? location.hostname : 'localhost';
+    const url = `${proto}://${host}:${process.env.NEXT_PUBLIC_COMMENTS_WS_PORT || '4002'}/?roomId=${encodeURIComponent(videoKey)}`;
+    try {
+      ws = new WebSocket(url); wsRef.current = ws;
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
+          if (msg?.type === 'comment' && msg.item) {
+            setComments((prev) => {
+              const exists = prev.some((x) => x.id === msg.item.id);
+              if (exists) return prev;
+              return [...prev, msg.item].slice(-200);
+            });
+          }
+          if (msg?.type === 'reply' && msg.item?.replyToUserId === userId) {
+            // TODO: integrate your toast center
+
+            alert(`你收到一条回复：${msg.item.content}`);
+          }
+        } catch { }
+      };
+    } catch { }
+    return () => { if (ws) try { ws.close(); } catch { } wsRef.current = null; };
+  }, [videoKey, userId]);
+
   async function submit() {
     if (!content.trim()) return;
     setSubmitting(true);
@@ -46,11 +77,10 @@ export default function VideoDetailClient({ videoKey }: { videoKey: string }) {
       await fetch("/api/comments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoId: videoKey, userId, content: content.trim() }),
+        body: JSON.stringify({ videoId: videoKey, userId, content: content.trim(), persist: true }),
       });
-      const res = await fetch(`/api/comments?videoId=${encodeURIComponent(videoKey)}`, { cache: "no-store" });
-      const data = await res.json();
-      setComments(data.items || []);
+      // 不再强制刷新列表，让 WS 增量驱动；本地先乐观追加（避免慢网）
+      setComments((prev) => [...prev, { id: `tmp_${Date.now()}`, userId, content: content.trim(), createdAt: new Date().toISOString() }]);
       setContent("");
     } finally {
       setSubmitting(false);
