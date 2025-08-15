@@ -56,6 +56,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const limit = parseNumber(searchParams.get("limit"), 12, 1, 1000);
     const token = searchParams.get("token");
+    const path = searchParams.get("path") || "";
     const expiresIn = parseNumber(searchParams.get("expires"), 600, 60, 3600);
     const includeHls = searchParams.get("includeHls") === "1";
 
@@ -74,24 +75,36 @@ export async function GET(request: Request) {
       return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
     }
 
-    const prefix = `uploads/users/${userId}/videos/`;
+    const userPrefix = `uploads/users/${userId}/videos/`;
+    if (path && !path.startsWith(userPrefix)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    const prefix = path || userPrefix;
 
     const listRes = await s3Client.send(
       new ListObjectsV2Command({
         Bucket: S3_BUCKET_NAME,
         Prefix: prefix,
+        Delimiter: "/",
         ContinuationToken: token || undefined,
         MaxKeys: limit,
       })
     );
 
-    const objects = (listRes.Contents || []).filter((obj: _Object) => !!obj.Key);
+    // Folders are returned in CommonPrefixes
+    const folders = (listRes.CommonPrefixes || []).map(p => ({
+      prefix: p.Prefix as string,
+      name: p.Prefix?.replace(prefix, "").replace(/\/$/, "") as string,
+    }));
+
+    // Files are returned in Contents, filter out folder placeholders
+    const objects = (listRes.Contents || []).filter((obj: _Object) => !!obj.Key && !obj.Key.endsWith("/") && obj.Key !== prefix);
 
     async function getHlsForKey(key: string): Promise<string | null> {
       if (!includeHls) return null;
       const baseName = key.split("/").at(-1)?.replace(/\.[^.]+$/, "") || "";
       const hlsPrefix = `outputs/hls/${baseName}-`;
-      const list = await s3Client.send(new ListObjectsV2Command({ Bucket: S3_BUCKET_NAME, Prefix: hlsPrefix, MaxKeys: 1000 }));
+      const list = await s3Client.send(new ListObjectsV2Command({ Bucket: S3_BUCKET_NAME, Prefix: hlsPrefix, MaxKeys: 1000, Delimiter: undefined }));
       const manifest = (list.Contents || []).find(o => (o.Key || "").endsWith("/master.m3u8"));
       if (!manifest?.Key) return null;
       const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: manifest.Key }), { expiresIn });
@@ -169,7 +182,7 @@ export async function GET(request: Request) {
       return null;
     }
 
-    const items = await Promise.all(
+    const files = await Promise.all(
       objects.map(async (obj) => {
         const key = obj.Key as string;
         const url = await getSignedUrl(
@@ -201,7 +214,8 @@ export async function GET(request: Request) {
     );
 
     return Response.json({
-      items,
+      folders,
+      files,
       nextToken: listRes.IsTruncated ? listRes.NextContinuationToken ?? null : null,
       expires: expiresIn,
     });
